@@ -15,3 +15,8 @@ __pycache__/
 yatra_bot.db
 bot_production.log
 __pycache__/
+
+bot_production.log
+.env
+yatra_bot.db
+__pycache__/
