@@ -22,7 +22,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 
 # 1. Initialize Telegram Bot Instance
-bot_app = Application.builder().token(TOKEN).connect_timeout(30.0).read_timeout(30.0).build()
+bot_app = Application.builder().token(TOKEN).connect_timeout(60.0).read_timeout(60.0).pool_timeout(60.0).build()
 
 # 2. Define Lifespan for Startup/Shutdown
 @asynccontextmanager
