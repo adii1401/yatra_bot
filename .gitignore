@@ -10,3 +10,8 @@ __pycache__/
 
 # Secrets (CRITICAL)
 .env
+
+.env
+yatra_bot.db
+bot_production.log
+__pycache__/
