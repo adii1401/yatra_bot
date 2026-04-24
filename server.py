@@ -27,9 +27,24 @@ t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=90.0, read_time
 bot_app = Application.builder().token(TOKEN).request(t_request).build()
 
 # 2. Define Lifespan for Startup/Shutdown
+# 2. Define Lifespan for Startup/Shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- DEBUGGING LINES ---
+    safe_token = TOKEN[:5] + "..." if TOKEN else "MISSING!"
+    logger.info(f"🔍 DEBUG: Loaded Token starts with: {safe_token}")
     logger.info("🗄️ Initializing database...")
+    # -----------------------
+
+    await init_db()# 2. Define Lifespan for Startup/Shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- DEBUGGING LINES ---
+    safe_token = TOKEN[:5] + "..." if TOKEN else "MISSING!"
+    logger.info(f"🔍 DEBUG: Loaded Token starts with: {safe_token}")
+    logger.info("🗄️ Initializing database...")
+    # -----------------------
+
     await init_db()
     
     # --- Register Handlers ---
