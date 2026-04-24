@@ -1,10 +1,11 @@
 ﻿import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
-from telegram.request import HTTPXRequest  # 👈 NEW IMPORT ADDED HERE
+from telegram.request import HTTPXRequest
 from sqlalchemy import select
 from dotenv import load_dotenv
 
@@ -19,50 +20,31 @@ from bot.utils.logger import setup_logger
 load_dotenv()
 logger = setup_logger("MasterServer")
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-# 1. Initialize Telegram Bot Instance with Custom Network Rules (90s Timeout)
-t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=90.0, read_timeout=90.0)
-bot_app = Application.builder().token(TOKEN).request(t_request).build()
+# 1. Initialize Telegram Bot Instance (Webhook Mode & Hardened Network)
+t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=60.0, read_timeout=60.0, http_version="1.1")
+bot_app = Application.builder().token(TOKEN).request(t_request).updater(None).build()
 
-# 2. Define Lifespan for Startup/Shutdown
-# 2. Define Lifespan for Startup/Shutdown
+# 2. SINGLE Lifespan Function (No duplicates!)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # --- DEBUGGING LINES ---
-    safe_token = TOKEN[:5] + "..." if TOKEN else "MISSING!"
-    logger.info(f"🔍 DEBUG: Loaded Token starts with: {safe_token}")
     logger.info("🗄️ Initializing database...")
-    # -----------------------
-
-    await init_db()# 2. Define Lifespan for Startup/Shutdown
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # --- DEBUGGING LINES ---
-    safe_token = TOKEN[:5] + "..." if TOKEN else "MISSING!"
-    logger.info(f"🔍 DEBUG: Loaded Token starts with: {safe_token}")
-    logger.info("🗄️ Initializing database...")
-    # -----------------------
-
     await init_db()
     
     # --- Register Handlers ---
-    
-    # 💰 Finance Handlers
     bot_app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("Trip OS Active! 🏔️🙏")))
     bot_app.add_handler(CommandHandler("paid", record_expense))
     bot_app.add_handler(CommandHandler("balance", check_balance))
     bot_app.add_handler(CallbackQueryHandler(handle_expense_callback))
     
-    # 🏔️ Safety & Logistics Handlers
     bot_app.add_handler(CommandHandler("plan_trip", plan_trip)) 
     bot_app.add_handler(CommandHandler("weather", get_weather)) 
     bot_app.add_handler(CommandHandler("whereis", where_is_everyone)) 
     bot_app.add_handler(CommandHandler("sos", sos_emergency))
     bot_app.add_handler(MessageHandler(filters.LOCATION, track_location)) 
     
-    # 🗺️ Universal Itinerary Handlers
     bot_app.add_handler(CommandHandler("explore", explore_nearby))
     bot_app.add_handler(CommandHandler("plan", show_plan))
     bot_app.add_handler(CommandHandler("gallery", trip_gallery)) 
@@ -70,20 +52,20 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("add_landmark", add_landmark))
     bot_app.add_handler(CommandHandler("set_plan", set_plan))
     
-    # 📁 Vault Handlers (Docs & IDs)
     bot_app.add_handler(CommandHandler("vault", open_vault)) 
     bot_app.add_handler(CommandHandler("get", get_vault_file)) 
     bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, save_to_vault)) 
     
+    logger.info("🚀 Booting Telegram Application...")
     await bot_app.initialize()
     await bot_app.start()
     
     # 🔗 Webhook Registration
     if WEBHOOK_URL:
-        clean_url = WEBHOOK_URL.strip().rstrip('/')
+        clean_url = WEBHOOK_URL.rstrip('/')
         full_webhook_path = f"{clean_url}/webhook"
-        await bot_app.bot.set_webhook(url=full_webhook_path)
-        logger.info(f"✅ Webhook securely locked to: {full_webhook_path}")
+        logger.info(f"🔗 Locking webhook to: {full_webhook_path}")
+        await bot_app.bot.set_webhook(url=full_webhook_path, drop_pending_updates=True)
     else:
         logger.critical("🚨 No WEBHOOK_URL found in .env!")
         
@@ -115,8 +97,11 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "error"}
 
 async def process_update(data: dict):
-    update = Update.de_json(data, bot_app.bot)
-    await bot_app.process_update(update)
+    try:
+        update = Update.de_json(data, bot_app.bot)
+        await bot_app.process_update(update)
+    except Exception as e:
+        logger.error(f"Failed to process update: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_dashboard():
