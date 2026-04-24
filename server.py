@@ -4,6 +4,7 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.request import HTTPXRequest  # 👈 NEW IMPORT ADDED HERE
 from sqlalchemy import select
 from dotenv import load_dotenv
 
@@ -21,8 +22,9 @@ logger = setup_logger("MasterServer")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 
-# 1. Initialize Telegram Bot Instance
-bot_app = Application.builder().token(TOKEN).connect_timeout(60.0).read_timeout(60.0).pool_timeout(60.0).build()
+# 1. Initialize Telegram Bot Instance with Custom Network Rules (90s Timeout)
+t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=90.0, read_timeout=90.0)
+bot_app = Application.builder().token(TOKEN).request(t_request).build()
 
 # 2. Define Lifespan for Startup/Shutdown
 @asynccontextmanager
