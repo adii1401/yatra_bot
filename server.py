@@ -24,13 +24,14 @@ logger = setup_logger("MasterServer")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-# 1. Initialize Telegram Bot Instance
-t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=20.0, read_timeout=20.0, http_version="1.1")
+# 1. Initialize Telegram Bot Instance (Hardened Network & Webhook Updater)
+t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=15.0, read_timeout=15.0, http_version="1.1")
 bot_app = Application.builder().token(TOKEN).request(t_request).updater(None).build()
 
-# 2. SINGLE Lifespan Function
+# 2. LIFESPAN: Consolidates DB, Handlers, and The Monkeypatch
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # --- Database & Log ---
     logger.info("🗄️ Initializing database...")
     await init_db()
     
@@ -57,42 +58,26 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("get", get_vault_file)) 
     bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, save_to_vault)) 
 
-    # --- CLAUDE'S FIX: Mock Bot User Object ---
+    # --- THE MONKEYPATCH: Manual Identity Injection ---
     try:
         bot_id = int(TOKEN.split(':')[0])
+        # We manually build the User object so the bot doesn't call get_me()
         bot_app.bot._bot = TGUser(id=bot_id, first_name="TripOS", is_bot=True, username="yatra_os_bot")
+        
+        # We manually flip the flags that say "I am ready"
         bot_app.bot._initialized = True
         bot_app._initialized = True
-        logger.info(f"🤖 Bot User Mocked (ID: {bot_id})")
+        logger.info(f"🤖 Bot Identity Hard-Injected (ID: {bot_id})")
     except Exception as e:
-        logger.error(f"❌ Failed to mock bot user: {e}")
+        logger.error(f"❌ Monkeypatch failed: {e}")
 
-    # --- Direct Webhook Injection ---
-    if WEBHOOK_URL:
-        clean_url = WEBHOOK_URL.rstrip('/')
-        full_webhook_path = f"{clean_url}/webhook"
-        async with httpx.AsyncClient() as client:
-            try:
-                resp = await client.post(
-                    f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-                    json={"url": full_webhook_path, "drop_pending_updates": True},
-                    timeout=10.0
-                )
-                logger.info(f"🔗 Webhook status: {resp.status_code}")
-            except:
-                logger.warning("⚠️ Webhook injection timed out (expected on HF), using manual bridge.")
-    
     yield
     logger.info("🛑 Shutting down server...")
 
-# 3. Create FastAPI App
+# 3. FastAPI App Setup
 app = FastAPI(lifespan=lifespan, title="Trip OS Master Node")
 
-# --- ROUTES ---
-
-@app.get("/health")
-async def health_check():
-    return {"status": "alive"}
+# --- WEBHOOK LOGIC ---
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -101,23 +86,28 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(process_update, data)
         return {"status": "ok"}
     except Exception as e:
-        logger.error(f"❌ Webhook Error: {e}")
+        logger.error(f"❌ Webhook Entry Error: {e}")
         return {"status": "error"}
 
 async def process_update(data: dict):
     try:
-        # Ensure underlying components are marked as ready
-        if not bot_app.bot._initialized:
-            bot_app.bot._initialized = True
-            
+        # We parse the JSON using the mocked bot instance
         update = Update.de_json(data, bot_app.bot)
         
+        # We ensure the application state is 'running' without re-initializing
         if not bot_app.running:
+            bot_app.running = True 
             await bot_app.start()
             
         await bot_app.process_update(update)
     except Exception as e:
         logger.error(f"❌ Failed to process update: {e}")
+
+# --- HEALTH & DASHBOARD ---
+
+@app.get("/health")
+async def health_check():
+    return {"status": "alive"}
 
 @app.get("/", response_class=HTMLResponse)
 async def read_dashboard():
@@ -136,19 +126,20 @@ async def read_dashboard():
     <html>
         <head><title>Trip Dashboard</title></head>
         <body style="font-family: sans-serif; padding: 40px; background: #f0f2f5;">
-            <div style="max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 12px;">
-                <h1 style="text-align: center;">🏔️ Squad Trip Ledger</h1>
+            <div style="max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+                <h1 style="text-align: center; color: #1a73e8;">🏔️ Squad Trip Ledger</h1>
                 <h2 style="text-align: center;">Total: ₹{total_spent:,.2f}</h2>
-                <table style="width: 100%; border-collapse: collapse;">
-                    <thead><tr style="background: #f8f9fa;"><th>Payer</th><th>Amount</th><th>Description</th></tr></thead>
+                <hr>
+                <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+                    <thead><tr style="background: #f8f9fa; border-bottom: 2px solid #eee;">
+                        <th style="padding: 12px; text-align: left;">Payer</th>
+                        <th style="padding: 12px; text-align: left;">Amount</th>
+                        <th style="padding: 12px; text-align: left;">Description</th>
+                    </tr></thead>
                     <tbody>
     """
     for row in expenses:
-        html_content += f"<tr><td style='padding:10px; border-bottom:1px solid #ddd;'><b>{row.name}</b></td><td>₹{row.Expense.amount:,.2f}</td><td>{row.Expense.description}</td></tr>"
+        html_content += f"<tr><td style='padding:12px; border-bottom:1px solid #eee;'><b>{row.name}</b></td><td style='padding:12px; border-bottom:1px solid #eee;'>₹{row.Expense.amount:,.2f}</td><td style='padding:12px; border-bottom:1px solid #eee;'>{row.Expense.description}</td></tr>"
+    
     html_content += "</tbody></table></div></body></html>"
     return html_content
-
-@app.on_event("startup")
-async def print_routes():
-    for route in app.routes:
-        logger.info(f"🛣️ Route Available: {route.path}")
