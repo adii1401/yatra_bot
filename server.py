@@ -1,5 +1,6 @@
 ﻿import os
 import httpx
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -24,7 +25,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 # 1. Initialize Telegram Bot Instance (Hardened Network & Webhook Updater)
-t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=15.0, read_timeout=15.0, http_version="1.1")
+t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=20.0, read_timeout=20.0, http_version="1.1")
 bot_app = Application.builder().token(TOKEN).request(t_request).updater(None).build()
 
 # 2. SINGLE Lifespan Function with Direct Webhook Injection
@@ -58,7 +59,7 @@ async def lifespan(app: FastAPI):
     
     logger.info("🚀 Forcing Direct Webhook Injection (Bypassing PTB Bootloader)...")
     
-    # Bypass PTB's heavy network bootloader that crashes on Hugging Face
+    # Bypass PTB's heavy network bootloader checks for cloud stability
     bot_app.bot._initialized = True
     bot_app._initialized = True
     
@@ -79,7 +80,7 @@ async def lifespan(app: FastAPI):
                 else:
                     logger.error(f"❌ Telegram rejected webhook: {resp.text}")
             except Exception as e:
-                logger.error(f"⚠️ Webhook HTTP Request failed, but server will remain active. Error: {e}")
+                logger.error(f"⚠️ Webhook Injection Request timed out, but server will proceed. Error: {e}")
     else:
         logger.critical("🚨 No WEBHOOK_URL found in .env!")
         
@@ -109,14 +110,13 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def process_update(data: dict):
     try:
-        # If the bot somehow bypassed our initialization hacks, initialize it lazily here at runtime
-        if not bot_app._initialized:
+        # Corrected attribute checks for initialization and running state
+        if not bot_app.bot._initialized:
             await bot_app.initialize()
             
         update = Update.de_json(data, bot_app.bot)
         
-        # Lazy start setup for serverless environments
-        if not bot_app._is_running:
+        if not bot_app.running:
             await bot_app.start()
             
         await bot_app.process_update(update)
