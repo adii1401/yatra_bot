@@ -85,13 +85,13 @@ class TripPlan(Base):
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    # Local development fallback
     DATABASE_URL = "sqlite+aiosqlite:///./yatra_bot.db"
-elif DATABASE_URL.startswith("postgres://"):
-    # Supabase uses old format — SQLAlchemy requires this
+else:
+    # Handle both postgres:// and postgresql:// formats from Supabase
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# SQLite doesn't support connection pooling — separate config for local vs cloud
+# SQLite doesn't support connection pooling
 if DATABASE_URL.startswith("sqlite"):
     engine = create_async_engine(
         DATABASE_URL,
@@ -101,10 +101,11 @@ else:
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
-        pool_pre_ping=True,   # Verify connection alive before using
-        pool_size=5,          # Keep 5 connections ready (Supabase free tier cap is 15)
-        max_overflow=10,      # Allow 10 extra under heavy load
-        pool_recycle=300      # Refresh connections every 5 mins — critical for mountain idle periods
+        pool_pre_ping=True,
+        pool_size=5,
+        max_overflow=10,
+        pool_recycle=300,
+        connect_args={"statement_cache_size": 0}  # Required for Supabase transaction pooler (pgbouncer)
     )
 
 AsyncSessionLocal = sessionmaker(
