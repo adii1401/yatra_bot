@@ -1,0 +1,7 @@
+2026-04-24 11:55:51 - [CRITICAL] - MasterServer - 🚨 No valid WEBHOOK_URL found in .env! Please update it.
+2026-04-24 14:47:14 - [ERROR] - LogisticsHandler - Plan Trip Error: (sqlite3.OperationalError) no such column: trip_groups.destination_name
+[SQL: SELECT trip_groups.chat_id AS trip_groups_chat_id, trip_groups.trip_name AS trip_groups_trip_name, trip_groups.destination_name AS trip_groups_destination_name, trip_groups.dest_lat AS trip_groups_dest_lat, trip_groups.dest_lon AS trip_groups_dest_lon, trip_groups.created_at AS trip_groups_created_at 
+FROM trip_groups 
+WHERE trip_groups.chat_id = ?]
+[parameters: (-1003810956087,)]
+(Background on this error at: https://sqlalche.me/e/20/e3q8)
