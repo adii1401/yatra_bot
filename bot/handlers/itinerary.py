@@ -53,6 +53,7 @@ async def show_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(f"🏔️ <b>Trip Itinerary</b>\n\n{plan.plan_text}", parse_mode='HTML')
 
+
 # --- SET Logic (Universal) ---
 
 async def add_landmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -84,3 +85,18 @@ async def set_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await session.execute(delete(TripPlan).where(TripPlan.chat_id == update.message.chat_id))
             session.add(TripPlan(chat_id=update.message.chat_id, plan_text=plan_content))
     await update.message.reply_text("✅ Trip plan updated!")
+
+
+# --- PLACEHOLDERS FOR SERVER.PY IMPORTS ---
+
+async def trip_gallery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for the AI Gallery feature."""
+    await update.message.reply_text("📸 AI Trip Gallery feature is currently under construction!")
+
+async def set_gallery(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for linking the gallery."""
+    await update.message.reply_text("🔗 Gallery linking feature is coming soon!")
+
+async def sos_emergency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder for the SOS Safety feature."""
+    await update.message.reply_text("🚨 SOS Protocol activated! (Broadcasting logic coming soon...)")

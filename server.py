@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from bot.database.db_config import init_db, AsyncSessionLocal, Expense, User
 from bot.handlers.expenses import record_expense, handle_expense_callback, check_balance
 from bot.handlers.logistics import track_location, get_weather, plan_trip, where_is_everyone
-# 🗺️ UPDATED: Added add_landmark and set_plan for Universal Engine
 from bot.handlers.itinerary import explore_nearby, show_plan, trip_gallery, set_gallery, sos_emergency, add_landmark, set_plan
 from bot.handlers.vault import save_to_vault, open_vault, get_vault_file 
 from bot.utils.logger import setup_logger
@@ -51,8 +50,8 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("plan", show_plan))
     bot_app.add_handler(CommandHandler("gallery", trip_gallery)) 
     bot_app.add_handler(CommandHandler("set_gallery", set_gallery))
-    bot_app.add_handler(CommandHandler("add_landmark", add_landmark)) # ✅ NEW
-    bot_app.add_handler(CommandHandler("set_plan", set_plan))         # ✅ NEW
+    bot_app.add_handler(CommandHandler("add_landmark", add_landmark))
+    bot_app.add_handler(CommandHandler("set_plan", set_plan))
     
     # 📁 Vault Handlers (Docs & IDs)
     bot_app.add_handler(CommandHandler("vault", open_vault)) 
