@@ -76,7 +76,9 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     update = Update.de_json(data, bot_app.bot)
     background_tasks.add_task(bot_app.process_update, update)
     return {"status": "ok"}
-
+@app.get("/health")
+async def health_check():
+    return {"status": "alive", "engine": "FastAPI"}
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return "<html><body style='font-family:sans-serif; text-align:center;'><h1>🏔️ Trip OS is Online</h1><p>Master Node is listening for updates.</p></body></html>"
