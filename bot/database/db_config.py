@@ -7,7 +7,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 Base = declarative_base()
 
 # ==========================================
-# 1. TABLES (1-8) - SCHEMA DEFINITION
+# TABLES - SCHEMA DEFINITION
 # ==========================================
 
 class User(Base):
@@ -22,7 +22,7 @@ class TripGroup(Base):
     chat_id = Column(BigInteger, primary_key=True, index=True)
     trip_name = Column(String, default="New Adventure")
     destination_name = Column(String, nullable=True)
-    gallery_link = Column(String, nullable=True) 
+    gallery_link = Column(String, nullable=True)
     dest_lat = Column(Float, nullable=True)
     dest_lon = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -52,7 +52,7 @@ class TripDocument(Base):
     chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), nullable=False)
     uploader_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
     file_id = Column(String, nullable=False)
-    file_type = Column(String, nullable=False) 
+    file_type = Column(String, nullable=False)
     caption = Column(String, nullable=True)
     uploaded_at = Column(DateTime, default=datetime.utcnow)
 
@@ -75,38 +75,44 @@ class Landmark(Base):
 
 class TripPlan(Base):
     __tablename__ = 'trip_plans'
-    # 🛡️ FIXED: Corrected the quote in ForeignKey
     chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), primary_key=True)
-    plan_text = Column(String, nullable=False) 
+    plan_text = Column(String, nullable=False)
 
 # ==========================================
-# 🛡️ CONNECTION SETUP (Universal Engine)
+# CONNECTION SETUP
 # ==========================================
 
-# Use Supabase URL if available, otherwise local SQLite for dev
 DATABASE_URL = os.getenv("DATABASE_URL")
+
 if not DATABASE_URL:
+    # Local development fallback
     DATABASE_URL = "sqlite+aiosqlite:///./yatra_bot.db"
 elif DATABASE_URL.startswith("postgres://"):
-    # SQLAlchemy requires 'postgresql+asyncpg' specifically
+    # Supabase uses old format — SQLAlchemy requires this
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
 
-engine = create_async_engine(
-    DATABASE_URL, 
-    echo=False,
-    # 📉 Optimization for Cloud-to-DB connections
-    pool_pre_ping=True, 
-    pool_size=5, 
-    max_overflow=10
-)
+# SQLite doesn't support connection pooling — separate config for local vs cloud
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False
+    )
+else:
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=False,
+        pool_pre_ping=True,   # Verify connection alive before using
+        pool_size=5,          # Keep 5 connections ready (Supabase free tier cap is 15)
+        max_overflow=10,      # Allow 10 extra under heavy load
+        pool_recycle=300      # Refresh connections every 5 mins — critical for mountain idle periods
+    )
 
 AsyncSessionLocal = sessionmaker(
-    bind=engine, 
-    class_=AsyncSession, 
+    bind=engine,
+    class_=AsyncSession,
     expire_on_commit=False
 )
 
 async def init_db():
     async with engine.begin() as conn:
-        # Build all 8 tables instantly 🚀
         await conn.run_sync(Base.metadata.create_all)
