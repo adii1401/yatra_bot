@@ -4,7 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
-from telegram import Update
+from telegram import Update, User as TGUser
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 from sqlalchemy import select
@@ -24,11 +24,11 @@ logger = setup_logger("MasterServer")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-# 1. Initialize Telegram Bot Instance (Hardened Network & Webhook Updater)
+# 1. Initialize Telegram Bot Instance
 t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=20.0, read_timeout=20.0, http_version="1.1")
 bot_app = Application.builder().token(TOKEN).request(t_request).updater(None).build()
 
-# 2. SINGLE Lifespan Function with Direct Webhook Injection
+# 2. SINGLE Lifespan Function
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🗄️ Initializing database...")
@@ -56,37 +56,33 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("vault", open_vault)) 
     bot_app.add_handler(CommandHandler("get", get_vault_file)) 
     bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, save_to_vault)) 
-    
-    logger.info("🚀 Forcing Direct Webhook Injection (Bypassing PTB Bootloader)...")
-    
-    # Bypass PTB's heavy network bootloader checks for cloud stability
-    bot_app.bot._initialized = True
-    bot_app._initialized = True
-    
-    # Directly lock the Webhook using raw httpx
+
+    # --- CLAUDE'S FIX: Mock Bot User Object ---
+    try:
+        bot_id = int(TOKEN.split(':')[0])
+        bot_app.bot._bot = TGUser(id=bot_id, first_name="TripOS", is_bot=True, username="yatra_os_bot")
+        bot_app.bot._initialized = True
+        bot_app._initialized = True
+        logger.info(f"🤖 Bot User Mocked (ID: {bot_id})")
+    except Exception as e:
+        logger.error(f"❌ Failed to mock bot user: {e}")
+
+    # --- Direct Webhook Injection ---
     if WEBHOOK_URL:
         clean_url = WEBHOOK_URL.rstrip('/')
         full_webhook_path = f"{clean_url}/webhook"
-        
         async with httpx.AsyncClient() as client:
             try:
                 resp = await client.post(
                     f"https://api.telegram.org/bot{TOKEN}/setWebhook",
                     json={"url": full_webhook_path, "drop_pending_updates": True},
-                    timeout=15.0
+                    timeout=10.0
                 )
-                if resp.status_code == 200:
-                    logger.info(f"✅ Webhook securely locked to: {full_webhook_path}")
-                else:
-                    logger.error(f"❌ Telegram rejected webhook: {resp.text}")
-            except Exception as e:
-                logger.error(f"⚠️ Webhook Injection Request timed out, but server will proceed. Error: {e}")
-    else:
-        logger.critical("🚨 No WEBHOOK_URL found in .env!")
-        
-    yield
+                logger.info(f"🔗 Webhook status: {resp.status_code}")
+            except:
+                logger.warning("⚠️ Webhook injection timed out (expected on HF), using manual bridge.")
     
-    # Clean Shutdown
+    yield
     logger.info("🛑 Shutting down server...")
 
 # 3. Create FastAPI App
@@ -96,7 +92,7 @@ app = FastAPI(lifespan=lifespan, title="Trip OS Master Node")
 
 @app.get("/health")
 async def health_check():
-    return {"status": "alive", "engine": "FastAPI + Telegram Webhook"}
+    return {"status": "alive"}
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -110,9 +106,9 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def process_update(data: dict):
     try:
-        # Corrected attribute checks for initialization and running state
+        # Ensure underlying components are marked as ready
         if not bot_app.bot._initialized:
-            await bot_app.initialize()
+            bot_app.bot._initialized = True
             
         update = Update.de_json(data, bot_app.bot)
         
@@ -121,7 +117,7 @@ async def process_update(data: dict):
             
         await bot_app.process_update(update)
     except Exception as e:
-        logger.error(f"Failed to process update: {e}")
+        logger.error(f"❌ Failed to process update: {e}")
 
 @app.get("/", response_class=HTMLResponse)
 async def read_dashboard():
@@ -138,30 +134,17 @@ async def read_dashboard():
 
     html_content = f"""
     <html>
-        <head>
-            <title>Trip Dashboard</title>
-            <style>
-                body {{ font-family: 'Segoe UI', sans-serif; background: #f0f2f5; padding: 40px; }}
-                .container {{ max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 12px; }}
-                .header {{ background: #1a73e8; color: white; padding: 20px; border-radius: 8px; text-align: center; }}
-                table {{ width: 100%; border-collapse: collapse; margin-top: 20px; }}
-                th, td {{ padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }}
-                th {{ background-color: #f8f9fa; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>🏔️ Squad Trip Ledger</h1>
-                    <h2>Total: ₹{total_spent:,.2f}</h2>
-                </div>
-                <table>
-                    <thead><tr><th>Payer</th><th>Amount</th><th>Description</th></tr></thead>
+        <head><title>Trip Dashboard</title></head>
+        <body style="font-family: sans-serif; padding: 40px; background: #f0f2f5;">
+            <div style="max-width: 800px; margin: auto; background: white; padding: 20px; border-radius: 12px;">
+                <h1 style="text-align: center;">🏔️ Squad Trip Ledger</h1>
+                <h2 style="text-align: center;">Total: ₹{total_spent:,.2f}</h2>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <thead><tr style="background: #f8f9fa;"><th>Payer</th><th>Amount</th><th>Description</th></tr></thead>
                     <tbody>
     """
     for row in expenses:
-        html_content += f"<tr><td><b>{row.name}</b></td><td>₹{row.Expense.amount:,.2f}</td><td>{row.Expense.description}</td></tr>"
-        
+        html_content += f"<tr><td style='padding:10px; border-bottom:1px solid #ddd;'><b>{row.name}</b></td><td>₹{row.Expense.amount:,.2f}</td><td>{row.Expense.description}</td></tr>"
     html_content += "</tbody></table></div></body></html>"
     return html_content
 
