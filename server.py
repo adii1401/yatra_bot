@@ -1,5 +1,5 @@
 ﻿import os
-import asyncio
+import httpx
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import HTMLResponse
@@ -23,11 +23,11 @@ logger = setup_logger("MasterServer")
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
-# 1. Initialize Telegram Bot Instance (Webhook Mode & Hardened Network)
-t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=60.0, read_timeout=60.0, http_version="1.1")
+# 1. Initialize Telegram Bot Instance (Hardened Network & Webhook Updater)
+t_request = HTTPXRequest(connection_pool_size=8, connect_timeout=15.0, read_timeout=15.0, http_version="1.1")
 bot_app = Application.builder().token(TOKEN).request(t_request).updater(None).build()
 
-# 2. SINGLE Lifespan Function (No duplicates!)
+# 2. SINGLE Lifespan Function with Direct Webhook Injection
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🗄️ Initializing database...")
@@ -56,16 +56,30 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("get", get_vault_file)) 
     bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, save_to_vault)) 
     
-    logger.info("🚀 Booting Telegram Application...")
-    await bot_app.initialize()
-    await bot_app.start()
+    logger.info("🚀 Forcing Direct Webhook Injection (Bypassing PTB Bootloader)...")
     
-    # 🔗 Webhook Registration
+    # Bypass PTB's heavy network bootloader that crashes on Hugging Face
+    bot_app.bot._initialized = True
+    bot_app._initialized = True
+    
+    # Directly lock the Webhook using raw httpx
     if WEBHOOK_URL:
         clean_url = WEBHOOK_URL.rstrip('/')
         full_webhook_path = f"{clean_url}/webhook"
-        logger.info(f"🔗 Locking webhook to: {full_webhook_path}")
-        await bot_app.bot.set_webhook(url=full_webhook_path, drop_pending_updates=True)
+        
+        async with httpx.AsyncClient() as client:
+            try:
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{TOKEN}/setWebhook",
+                    json={"url": full_webhook_path, "drop_pending_updates": True},
+                    timeout=15.0
+                )
+                if resp.status_code == 200:
+                    logger.info(f"✅ Webhook securely locked to: {full_webhook_path}")
+                else:
+                    logger.error(f"❌ Telegram rejected webhook: {resp.text}")
+            except Exception as e:
+                logger.error(f"⚠️ Webhook HTTP Request failed, but server will remain active. Error: {e}")
     else:
         logger.critical("🚨 No WEBHOOK_URL found in .env!")
         
@@ -73,9 +87,6 @@ async def lifespan(app: FastAPI):
     
     # Clean Shutdown
     logger.info("🛑 Shutting down server...")
-    await bot_app.bot.delete_webhook()
-    await bot_app.stop()
-    await bot_app.shutdown()
 
 # 3. Create FastAPI App
 app = FastAPI(lifespan=lifespan, title="Trip OS Master Node")
@@ -98,7 +109,16 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
 
 async def process_update(data: dict):
     try:
+        # If the bot somehow bypassed our initialization hacks, initialize it lazily here at runtime
+        if not bot_app._initialized:
+            await bot_app.initialize()
+            
         update = Update.de_json(data, bot_app.bot)
+        
+        # Lazy start setup for serverless environments
+        if not bot_app._is_running:
+            await bot_app.start()
+            
         await bot_app.process_update(update)
     except Exception as e:
         logger.error(f"Failed to process update: {e}")
