@@ -12,6 +12,12 @@ Base = declarative_base()
 # TABLES - SCHEMA DEFINITION
 # ==========================================
 
+class TripPlan(Base):
+    __tablename__ = 'trip_plans'
+    # Ensure chat_id is explicitly marked as the primary key
+    chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), primary_key=True)
+    plan_text = Column(String, nullable=False)
+
 class User(Base):
     __tablename__ = 'users'
     telegram_id = Column(BigInteger, primary_key=True, index=True)

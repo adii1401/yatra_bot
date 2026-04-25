@@ -29,46 +29,58 @@ bot_app = Application.builder().token(TOKEN).updater(None).build()
 
 
 # ==========================================
-# START HANDLER — Registers user & group in DB
+# GLOBAL ERROR HANDLER
+# ==========================================
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Unhandled exception: {context.error}")
+    if isinstance(update, Update) and update.message:
+        await update.message.reply_text("⚠️ Something went wrong, please try again in a moment.")
+
+
+# ==========================================
+# START HANDLER
 # ==========================================
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Register user and group in DB on /start and greet them."""
     user = update.effective_user
     chat = update.effective_chat
 
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # 1. Register User
-                stmt = pg_insert(User).values(
+                # 🛡️ UPSERT USER
+                await session.execute(pg_insert(User).values(
                     telegram_id=user.id,
                     name=user.full_name,
                     username=user.username
-                ).on_conflict_do_nothing(index_elements=['telegram_id'])
-                await session.execute(stmt)
+                ).on_conflict_do_nothing(index_elements=['telegram_id']))
 
-                # 2. Register Group if /start sent inside a group chat
+                # 🛡️ UPSERT GROUP
                 if chat.type != 'private':
-                    group_stmt = pg_insert(TripGroup).values(
+                    await session.execute(pg_insert(TripGroup).values(
                         chat_id=chat.id,
                         trip_name=chat.title
-                    ).on_conflict_do_nothing(index_elements=['chat_id'])
-                    await session.execute(group_stmt)
+                    ).on_conflict_do_nothing(index_elements=['chat_id']))
+                
+                # 🛠️ THE FIX: Flush parent rows before transaction ends
+                await session.flush()
 
-        await update.message.reply_text(
-            f"🏔️ Welcome to Trip OS, {user.first_name}!\n\n"
-            f"You're now registered. Use /paid in the group to log expenses.\n\n"
-            f"Commands:\n"
-            f"/paid <amount> <desc> — Log an expense\n"
-            f"/balance — See who owes what\n"
-            f"/whereis — Squad locations\n"
-            f"/sos — Emergency broadcast\n"
-            f"/explore — Nearby places\n"
-            f"/vault — Trip documents"
-        )
     except Exception as e:
-        logger.error(f"Start handler error: {e}")
-        await update.message.reply_text("🏔️ Trip OS Active!")
+        logger.error(f"Start handler DB error: {e}")
+        if update.message:
+            await update.message.reply_text("⚠️ Connection busy, please try /start again.")
+        return
+
+    await update.message.reply_text(
+        f"🏔️ Welcome to Trip OS, {user.first_name}!\n\n"
+        f"You're now registered. Use /paid in the group to log expenses.\n\n"
+        f"Commands:\n"
+        f"/paid <amount> <desc> — Log an expense\n"
+        f"/balance — See who owes what\n"
+        f"/whereis — Squad locations\n"
+        f"/sos — Emergency broadcast\n"
+        f"/explore — Nearby places\n"
+        f"/vault — Trip documents"
+    )
 
 
 # ==========================================
@@ -76,7 +88,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # RUN DB CONNECTION IN BACKGROUND SO RENDER DOES NOT CRASH
     async def boot_db():
         try:
             logger.info("🗄️ Connecting to Supabase...")
@@ -85,9 +96,9 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"🚨 Database Connection Failed: {e}")
 
-    # Launch it and move on instantly
     asyncio.create_task(boot_db())
 
+    # Handlers Registration
     bot_app.add_handler(CommandHandler("start", start_handler))
     bot_app.add_handler(CommandHandler("paid", record_expense))
     bot_app.add_handler(CommandHandler("balance", check_balance))
@@ -106,6 +117,8 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(CommandHandler("vault", open_vault))
     bot_app.add_handler(CommandHandler("get", get_vault_file))
     bot_app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, save_to_vault))
+
+    bot_app.add_error_handler(error_handler)
 
     await bot_app.initialize()
     await bot_app.start()
@@ -146,7 +159,6 @@ async def health_check():
 async def dashboard(chat_id: int = Query(None)):
     try:
         async with AsyncSessionLocal() as session:
-            # --- No chat_id: show group selector ---
             if not chat_id:
                 groups_result = await session.execute(select(TripGroup))
                 groups = groups_result.scalars().all()
@@ -222,7 +234,6 @@ async def dashboard(chat_id: int = Query(None)):
 </body>
 </html>"""
 
-            # --- Group-specific dashboard ---
             group_res = await session.get(TripGroup, chat_id)
             trip_name = group_res.trip_name if group_res else f"Group {chat_id}"
 
@@ -245,8 +256,10 @@ async def dashboard(chat_id: int = Query(None)):
 
         total = sum(r.Expense.amount for r in expenses)
         num_people = len(per_person)
+        
+        # 🛠️ THE FIX: Guard against division by zero
         share = total / num_people if num_people > 0 else 0
-        avg = total / len(expenses) if expenses else 0
+        avg = total / len(expenses) if len(expenses) > 0 else 0
 
         settlement_html = ""
         for name, paid, count in per_person:
@@ -365,7 +378,6 @@ async def dashboard(chat_id: int = Query(None)):
         .timeline-amount {{ font-family:'Bebas Neue',cursive; font-size:1.1rem; color:var(--amber); white-space:nowrap; }}
         .timeline-desc {{ font-size:0.8rem; color:rgba(168,216,234,0.45); margin-bottom:4px; }}
         .timeline-time {{ font-size:0.7rem; color:rgba(168,216,234,0.22); }}
-        .empty {{ text-align:center; padding:48px 20px; color:rgba(168,216,234,0.22); font-size:0.88rem; line-height:1.8; }}
         .footer {{ text-align:center; padding:32px 20px 16px; color:rgba(168,216,234,0.12); font-size:0.72rem; letter-spacing:2px; }}
         @keyframes fadeUp {{ from{{opacity:0;transform:translateY(16px);}} to{{opacity:1;transform:translateY(0);}} }}
         @media(max-width:600px){{
@@ -412,7 +424,7 @@ async def dashboard(chat_id: int = Query(None)):
         <div class="section">
             <div class="section-header"><span>📋</span><div class="section-title">Expense Timeline</div></div>
             <div class="timeline">
-                {timeline_html if timeline_html else '<div class="empty">No expenses recorded yet.<br>Use /paid in the group to start.</div>'}
+                {timeline_html if timeline_html else '<div class="empty">No expenses recorded yet.</div>'}
             </div>
         </div>
     </div>
