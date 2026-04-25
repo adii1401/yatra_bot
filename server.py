@@ -13,8 +13,7 @@ from bot.database.db_config import init_db, AsyncSessionLocal, Expense, User, Tr
 from bot.handlers.expenses import record_expense, handle_expense_callback, check_balance
 from bot.handlers.logistics import track_location, get_weather, plan_trip, where_is_everyone
 from bot.handlers.itinerary import (
-    explore_nearby, show_plan, trip_gallery, set_gallery,
-    sos_emergency, add_landmark, set_plan
+    explore_nearby, show_plan, sos_emergency, add_landmark, set_plan
 )
 from bot.handlers.vault import save_to_vault, open_vault, get_vault_file
 from bot.utils.logger import setup_logger
@@ -27,7 +26,6 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 bot_app = Application.builder().token(TOKEN).updater(None).build()
 
-
 # ==========================================
 # GLOBAL ERROR HANDLER
 # ==========================================
@@ -35,7 +33,6 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Unhandled exception: {context.error}")
     if isinstance(update, Update) and update.message:
         await update.message.reply_text("⚠️ Something went wrong, please try again in a moment.")
-
 
 # ==========================================
 # START HANDLER
@@ -47,21 +44,18 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # 🛡️ UPSERT USER
                 await session.execute(pg_insert(User).values(
                     telegram_id=user.id,
                     name=user.full_name,
                     username=user.username
                 ).on_conflict_do_nothing(index_elements=['telegram_id']))
 
-                # 🛡️ UPSERT GROUP
                 if chat.type != 'private':
                     await session.execute(pg_insert(TripGroup).values(
                         chat_id=chat.id,
                         trip_name=chat.title
                     ).on_conflict_do_nothing(index_elements=['chat_id']))
                 
-                # 🛠️ THE FIX: Flush parent rows before transaction ends
                 await session.flush()
 
     except Exception as e:
@@ -72,7 +66,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"🏔️ Welcome to Trip OS, {user.first_name}!\n\n"
-        f"You're now registered. Use /paid in the group to log expenses.\n\n"
         f"Commands:\n"
         f"/paid <amount> <desc> — Log an expense\n"
         f"/balance — See who owes what\n"
@@ -81,7 +74,6 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/explore — Nearby places\n"
         f"/vault — Trip documents"
     )
-
 
 # ==========================================
 # LIFESPAN
@@ -98,7 +90,6 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(boot_db())
 
-    # Handlers Registration
     bot_app.add_handler(CommandHandler("start", start_handler))
     bot_app.add_handler(CommandHandler("paid", record_expense))
     bot_app.add_handler(CommandHandler("balance", check_balance))
@@ -110,8 +101,9 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(MessageHandler(filters.LOCATION, track_location))
     bot_app.add_handler(CommandHandler("explore", explore_nearby))
     bot_app.add_handler(CommandHandler("plan", show_plan))
-    bot_app.add_handler(CommandHandler("gallery", trip_gallery))
-    bot_app.add_handler(CommandHandler("set_gallery", set_gallery))
+    # Redirecting under-construction features to prevent crashes
+    bot_app.add_handler(CommandHandler("gallery", sos_emergency))
+    bot_app.add_handler(CommandHandler("set_gallery", sos_emergency))
     bot_app.add_handler(CommandHandler("add_landmark", add_landmark))
     bot_app.add_handler(CommandHandler("set_plan", set_plan))
     bot_app.add_handler(CommandHandler("vault", open_vault))
@@ -132,12 +124,7 @@ async def lifespan(app: FastAPI):
     await bot_app.stop()
     await bot_app.shutdown()
 
-
-# ==========================================
-# FASTAPI APP
-# ==========================================
 app = FastAPI(lifespan=lifespan)
-
 
 @app.post("/webhook")
 async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -146,11 +133,9 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     background_tasks.add_task(bot_app.process_update, update)
     return {"status": "ok"}
 
-
 @app.get("/health")
 async def health_check():
     return {"status": "alive", "engine": "FastAPI"}
-
 
 # ==========================================
 # DASHBOARD

@@ -58,3 +58,7 @@ async def set_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Plan updated!")
     except Exception as e:
         logger.error(f"set_plan error: {e}")
+
+# 🛠️ RESTORED: To fix the server.py import error
+async def sos_emergency(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🚨 <b>SOS Feature</b>: Currently under construction, please contact emergency services directly.", parse_mode='HTML')
