@@ -87,25 +87,29 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = "sqlite+aiosqlite:///./yatra_bot.db"
 else:
-    # Handle both postgres:// and postgresql:// formats from Supabase
+    # Ensure URL is clean and uses the asyncpg driver
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# SQLite doesn't support connection pooling
+# SQLite config for local testing
 if DATABASE_URL.startswith("sqlite"):
     engine = create_async_engine(
         DATABASE_URL,
         echo=False
     )
+# Supabase config for production on Render
 else:
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
         pool_pre_ping=True,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=3,          # Reduced for Supabase free tier
+        max_overflow=5,       # Reduced to prevent hitting connection limits
         pool_recycle=300,
-        connect_args={"statement_cache_size": 0}  # Required for Supabase transaction pooler (pgbouncer)
+        connect_args={
+            "timeout": 60,         # CRITICAL: Fixes Render startup CancelledError
+            "command_timeout": 60  # Prevents long queries from freezing the bot
+        }
     )
 
 AsyncSessionLocal = sessionmaker(
