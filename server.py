@@ -1,4 +1,5 @@
 ﻿import os
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks, Query
 from fastapi.responses import HTMLResponse
@@ -75,8 +76,17 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("🗄️ Connecting to Supabase...")
-    await init_db()
+    # RUN DB CONNECTION IN BACKGROUND SO RENDER DOES NOT CRASH
+    async def boot_db():
+        try:
+            logger.info("🗄️ Connecting to Supabase...")
+            await init_db()
+            logger.info("✅ Database Connected Successfully!")
+        except Exception as e:
+            logger.error(f"🚨 Database Connection Failed: {e}")
+
+    # Launch it and move on instantly
+    asyncio.create_task(boot_db())
 
     bot_app.add_handler(CommandHandler("start", start_handler))
     bot_app.add_handler(CommandHandler("paid", record_expense))
@@ -136,7 +146,6 @@ async def health_check():
 async def dashboard(chat_id: int = Query(None)):
     try:
         async with AsyncSessionLocal() as session:
-
             # --- No chat_id: show group selector ---
             if not chat_id:
                 groups_result = await session.execute(select(TripGroup))

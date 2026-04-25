@@ -1,5 +1,4 @@
 import os
-import ssl  # MUST IMPORT SSL
 from datetime import datetime
 from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -100,11 +99,6 @@ if DATABASE_URL.startswith("sqlite"):
     )
 # Supabase config for production on Render
 else:
-    # CREATE SSL CONTEXT TO PREVENT HANDSHAKE TIMEOUT
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
-
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
@@ -113,8 +107,7 @@ else:
         max_overflow=5,
         pool_recycle=300,
         connect_args={
-            "ssl": ssl_context,         # <--- Fixes CancelledError / Timeout
-            "statement_cache_size": 0,  # <--- Fixes PgBouncer Port 6543 crashes
+            "statement_cache_size": 0,  
             "timeout": 60,              
             "command_timeout": 60       
         }
