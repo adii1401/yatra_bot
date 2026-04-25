@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, DateTime, ForeignKey
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.pool import NullPool  
 
 Base = declarative_base()
 
@@ -102,14 +103,11 @@ else:
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
-        pool_pre_ping=True,
-        pool_size=3,
-        max_overflow=5,
-        pool_recycle=300,
+        poolclass=NullPool,  # <--- This fixes the "Connection Closed" error
         connect_args={
-            "statement_cache_size": 0,  
-            "timeout": 60,              
-            "command_timeout": 60       
+            "statement_cache_size": 0,  # Keeps the pooler happy
+            "timeout": 60,
+            "command_timeout": 60
         }
     )
 
