@@ -4,19 +4,15 @@ from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, Date
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
-import logging # 🛠️ Add this
-logger = logging.getLogger("DatabaseConfig") # 🛠️ Add this
+# 🛠️ FIXED: Standardized logger to match your other files
+from bot.utils.logger import setup_logger
+
+logger = setup_logger("DatabaseConfig")
 Base = declarative_base()
 
 # ==========================================
 # TABLES - SCHEMA DEFINITION
 # ==========================================
-
-class TripPlan(Base):
-    __tablename__ = 'trip_plans'
-    # Ensure chat_id is explicitly marked as the primary key
-    chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), primary_key=True)
-    plan_text = Column(String, nullable=False)
 
 class User(Base):
     __tablename__ = 'users'
@@ -84,6 +80,7 @@ class Landmark(Base):
 
 class TripPlan(Base):
     __tablename__ = 'trip_plans'
+    # 🛠️ FIXED: Ensure chat_id is explicitly marked as the primary key
     chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), primary_key=True)
     plan_text = Column(String, nullable=False)
 
@@ -92,7 +89,6 @@ class TripPlan(Base):
 # ==========================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-
 if not DATABASE_URL:
     DATABASE_URL = "sqlite+aiosqlite:///./yatra_bot.db"
 else:
@@ -106,25 +102,17 @@ else:
         DATABASE_URL,
         echo=False,
         poolclass=NullPool,
-        connect_args={
-            "statement_cache_size": 0,
-            "timeout": 60,
-            "command_timeout": 60,
-        }
+        connect_args={"statement_cache_size": 0, "timeout": 60, "command_timeout": 60}
     )
     engine.sync_engine.dialect.server_version_info = (15, 0)
 
-AsyncSessionLocal = sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    expire_on_commit=False
-)
+AsyncSessionLocal = sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
 
 async def init_db():
     try:
         async with engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
             await conn.run_sync(Base.metadata.create_all)
-        logger.info("✅ Database Schema Synced Successfully") # <--- This was the trigger
+        logger.info("✅ Database Schema Synced Successfully")
     except Exception as e:
         logger.error(f"🚨 Database Init Error: {e}")

@@ -42,10 +42,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         admins = await context.bot.get_chat_administrators(chat_id)
     except Exception as e:
         logger.error(f"Admin fetch error: {e}")
-        await update.message.reply_text("❌ Error fetching admins.")
         return
 
-    # Store unique description in context
+    # 🛠️ PERSISTENCE FIX: Save description to bot_data so it survives until approval
     context.bot_data[f"desc_{user.id}_{amount}"] = description
 
     keyboard = [[
@@ -56,7 +55,7 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_msg = (
         f"🔔 <b>Expense Approval</b>\n"
         f"👤 <b>Who:</b> {user.first_name}\n"
-        f"💰 <b>Amount:</b> ₹{amount}\n"
+        f"💰 <b>Amount:</b> ₹{amount:,.2f}\n"
         f"📝 <b>For:</b> {description}\n"
     )
 
@@ -75,9 +74,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 continue
 
     if sent_count == 0:
-        await update.message.reply_text("⚠️ Admins must start the bot in DM first!")
+        await update.message.reply_text("⚠️ Admins must <b>Start</b> the bot in DM first!", parse_mode='HTML')
     else:
-        await update.message.reply_text(f"⏳ Sent to {sent_count} admins for approval.")
+        await update.message.reply_text(f"⏳ ₹{amount} sent to {sent_count} admins for approval.")
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -85,40 +84,55 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
 
     data_parts = query.data.split("_")
     action, target_chat_id, target_user_id, amount = data_parts[0], int(data_parts[1]), int(data_parts[2]), float(data_parts[3])
-    admin_name = query.from_user.first_name
-
+    
     if action == "rejt":
         await query.edit_message_text(f"❌ Rejected ₹{amount}.")
-        await context.bot.send_message(chat_id=target_chat_id, text=f"❌ {admin_name} rejected ₹{amount} expense.")
+        await context.bot.send_message(chat_id=target_chat_id, text=f"❌ Expense of ₹{amount} was rejected.")
         return
 
     if action == "appv":
         description = context.bot_data.get(f"desc_{target_user_id}_{amount}", "Trip Expense")
         try:
+            # 🛠️ GET CLEAN PAYER INFO
             user_info = await context.bot.get_chat(target_user_id)
             async with AsyncSessionLocal() as session:
                 async with session.begin():
                     await _upsert_trip_group(session, target_chat_id)
                     await _upsert_user(session, target_user_id, user_info.first_name, getattr(user_info, 'username', None))
                     await session.flush()
-                    session.add(Expense(chat_id=target_chat_id, payer_id=target_user_id, amount=amount, description=description, is_verified=True))
+                    session.add(Expense(
+                        chat_id=target_chat_id, 
+                        payer_id=target_user_id, 
+                        amount=amount, 
+                        description=description, 
+                        is_verified=True
+                    ))
             
             await query.edit_message_text(f"✅ Approved ₹{amount}")
-            await context.bot.send_message(chat_id=target_chat_id, text=f"✅ Approved ₹{amount} for <b>{user_info.first_name}</b>.", parse_mode='HTML')
+            await context.bot.send_message(
+                chat_id=target_chat_id, 
+                text=f"✅ <b>{query.from_user.first_name}</b> approved ₹{amount} for <b>{user_info.first_name}</b>.", 
+                parse_mode='HTML'
+            )
         except Exception as e:
             logger.error(f"Approval error: {e}")
-            await query.edit_message_text("❌ Database error.")
+            await query.edit_message_text("❌ Database error during approval.")
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         async with AsyncSessionLocal() as session:
-            res_total = await session.execute(select(func.sum(Expense.amount)).where(Expense.chat_id == chat_id, Expense.is_verified == True))
+            # Total sum
+            res_total = await session.execute(
+                select(func.sum(Expense.amount)).where(Expense.chat_id == chat_id, Expense.is_verified == True)
+            )
             total_spent = res_total.scalar() or 0
+            
             if total_spent == 0:
                 await update.message.reply_text("📊 No verified expenses yet!")
                 return
 
+            # Per-person sum
             res_users = await session.execute(
                 select(User.name, func.sum(Expense.amount))
                 .join(Expense, User.telegram_id == Expense.payer_id)
@@ -129,11 +143,20 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         num_people = len(user_totals)
         share = total_spent / num_people
-        text = f"📊 <b>Settlement</b>\n💰 Total: ₹{total_spent:,.2f}\n👥 Share: ₹{share:,.2f}\n\n"
+        
+        text = (
+            f"📊 <b>Settlement Dashboard</b>\n"
+            f"💰 <b>Total Spent:</b> ₹{total_spent:,.2f}\n"
+            f"👥 <b>Equal Share:</b> ₹{share:,.2f}\n"
+            f"➖➖➖➖➖➖➖➖➖➖\n"
+        )
         for name, paid in user_totals:
             diff = paid - share
             icon = "🟢" if diff >= 0 else "🔴"
-            text += f"{icon} <b>{name}</b>: {('gets back' if diff >= 0 else 'owes')} ₹{abs(diff):,.2f}\n"
+            status = "gets back" if diff >= 0 else "owes"
+            text += f"{icon} <b>{name}</b> {status} ₹{abs(diff):,.2f}\n"
+            
         await update.message.reply_text(text, parse_mode='HTML')
     except Exception as e:
         logger.error(f"Balance error: {e}")
+        await update.message.reply_text("⚠️ Error calculating balance.")
