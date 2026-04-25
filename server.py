@@ -41,28 +41,34 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     chat = update.effective_chat
 
-    try:
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                await session.execute(pg_insert(User).values(
-                    telegram_id=user.id,
-                    name=user.full_name,
-                    username=user.username
-                ).on_conflict_do_nothing(index_elements=['telegram_id']))
+    # 🏔️ RESILIENCE: Retry loop for unstable mountain networks
+    for attempt in range(3):
+        try:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    # 1. Register User
+                    await session.execute(pg_insert(User).values(
+                        telegram_id=user.id,
+                        name=user.full_name,
+                        username=user.username
+                    ).on_conflict_do_nothing(index_elements=['telegram_id']))
 
-                if chat.type != 'private':
-                    await session.execute(pg_insert(TripGroup).values(
-                        chat_id=chat.id,
-                        trip_name=chat.title
-                    ).on_conflict_do_nothing(index_elements=['chat_id']))
-                
-                await session.flush()
-
-    except Exception as e:
-        logger.error(f"Start handler DB error: {e}")
-        if update.message:
-            await update.message.reply_text("⚠️ Connection busy, please try /start again.")
-        return
+                    # 2. Register Group
+                    if chat.type != 'private':
+                        await session.execute(pg_insert(TripGroup).values(
+                            chat_id=chat.id,
+                            trip_name=chat.title
+                        ).on_conflict_do_nothing(index_elements=['chat_id']))
+                    
+                    await session.flush()
+                break  # Success! Exit retry loop
+        except Exception as e:
+            logger.error(f"Start handler attempt {attempt+1} failed: {e}")
+            if attempt == 2:  # All retries failed
+                if update.message:
+                    await update.message.reply_text("⚠️ Database busy. Please try /start again in 5 seconds.")
+                return
+            await asyncio.sleep(1)  # Wait 1s before retrying
 
     await update.message.reply_text(
         f"🏔️ Welcome to Trip OS, {user.first_name}!\n\n"
@@ -75,6 +81,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"/vault — Trip documents"
     )
 
+    
 # ==========================================
 # LIFESPAN
 # ==========================================
