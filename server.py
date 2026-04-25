@@ -13,7 +13,7 @@ from bot.database.db_config import init_db, AsyncSessionLocal, Expense, User, Tr
 from bot.handlers.expenses import record_expense, handle_expense_callback, check_balance
 from bot.handlers.logistics import track_location, get_weather, plan_trip, where_is_everyone
 from bot.handlers.itinerary import (
-    explore_nearby, show_plan, sos_emergency, add_landmark, set_plan
+    explore_nearby, show_plan, sos_emergency, handle_sos_callback, add_landmark, set_plan
 )
 from bot.handlers.vault import save_to_vault, open_vault, get_vault_file
 from bot.utils.logger import setup_logger
@@ -90,10 +90,15 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(boot_db())
 
+    # Handler Registration
     bot_app.add_handler(CommandHandler("start", start_handler))
     bot_app.add_handler(CommandHandler("paid", record_expense))
     bot_app.add_handler(CommandHandler("balance", check_balance))
-    bot_app.add_handler(CallbackQueryHandler(handle_expense_callback))
+    
+    # 🛠️ THE FIX: Specific patterns for distinct callback handlers
+    bot_app.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^(appv|rejt)_"))
+    bot_app.add_handler(CallbackQueryHandler(handle_sos_callback, pattern="^sos_confirm"))
+
     bot_app.add_handler(CommandHandler("plan_trip", plan_trip))
     bot_app.add_handler(CommandHandler("weather", get_weather))
     bot_app.add_handler(CommandHandler("whereis", where_is_everyone))
@@ -101,9 +106,11 @@ async def lifespan(app: FastAPI):
     bot_app.add_handler(MessageHandler(filters.LOCATION, track_location))
     bot_app.add_handler(CommandHandler("explore", explore_nearby))
     bot_app.add_handler(CommandHandler("plan", show_plan))
-    # Redirecting under-construction features to prevent crashes
+    
+    # Under-construction feature redirects
     bot_app.add_handler(CommandHandler("gallery", sos_emergency))
     bot_app.add_handler(CommandHandler("set_gallery", sos_emergency))
+    
     bot_app.add_handler(CommandHandler("add_landmark", add_landmark))
     bot_app.add_handler(CommandHandler("set_plan", set_plan))
     bot_app.add_handler(CommandHandler("vault", open_vault))
@@ -138,7 +145,7 @@ async def health_check():
     return {"status": "alive", "engine": "FastAPI"}
 
 # ==========================================
-# DASHBOARD
+# DASHBOARD (HTML RESPONSE)
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(chat_id: int = Query(None)):
@@ -241,8 +248,6 @@ async def dashboard(chat_id: int = Query(None)):
 
         total = sum(r.Expense.amount for r in expenses)
         num_people = len(per_person)
-        
-        # 🛠️ THE FIX: Guard against division by zero
         share = total / num_people if num_people > 0 else 0
         avg = total / len(expenses) if len(expenses) > 0 else 0
 

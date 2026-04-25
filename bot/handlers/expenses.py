@@ -1,5 +1,6 @@
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest # 🛠️ ADDED: To catch double-clicks
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from bot.database.db_config import AsyncSessionLocal, Expense, User, TripGroup
@@ -44,7 +45,7 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Admin fetch error: {e}")
         return
 
-    # 🛠️ PERSISTENCE FIX: Save description to bot_data so it survives until approval
+    # Save description to bot_data so it survives until approval
     context.bot_data[f"desc_{user.id}_{amount}"] = description
 
     keyboard = [[
@@ -86,14 +87,17 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
     action, target_chat_id, target_user_id, amount = data_parts[0], int(data_parts[1]), int(data_parts[2]), float(data_parts[3])
     
     if action == "rejt":
-        await query.edit_message_text(f"❌ Rejected ₹{amount}.")
-        await context.bot.send_message(chat_id=target_chat_id, text=f"❌ Expense of ₹{amount} was rejected.")
+        try:
+            await query.edit_message_text(f"❌ Rejected ₹{amount}.")
+            await context.bot.send_message(chat_id=target_chat_id, text=f"❌ Expense of ₹{amount} was rejected.")
+        except BadRequest as e:
+            if "Message is not modified" not in str(e):
+                logger.error(f"Rejection UI error: {e}")
         return
 
     if action == "appv":
         description = context.bot_data.get(f"desc_{target_user_id}_{amount}", "Trip Expense")
         try:
-            # 🛠️ GET CLEAN PAYER INFO
             user_info = await context.bot.get_chat(target_user_id)
             async with AsyncSessionLocal() as session:
                 async with session.begin():
@@ -108,21 +112,32 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
                         is_verified=True
                     ))
             
-            await query.edit_message_text(f"✅ Approved ₹{amount}")
-            await context.bot.send_message(
-                chat_id=target_chat_id, 
-                text=f"✅ <b>{query.from_user.first_name}</b> approved ₹{amount} for <b>{user_info.first_name}</b>.", 
-                parse_mode='HTML'
-            )
+            # 🛠️ THE FIX: Specific handling for Telegram UI race conditions
+            try:
+                await query.edit_message_text(f"✅ Approved ₹{amount}")
+                await context.bot.send_message(
+                    chat_id=target_chat_id, 
+                    text=f"✅ <b>{query.from_user.first_name}</b> approved ₹{amount} for <b>{user_info.first_name}</b>.", 
+                    parse_mode='HTML'
+                )
+            except BadRequest as e:
+                if "Message is not modified" in str(e):
+                    pass # Ignore if another admin already approved it
+                else:
+                    raise e
+
         except Exception as e:
             logger.error(f"Approval error: {e}")
-            await query.edit_message_text("❌ Database error during approval.")
+            # Prevent showing error if database already has the record
+            if "duplicate key" not in str(e).lower():
+                await query.edit_message_text("❌ Database error during approval.")
+            else:
+                await query.edit_message_text("⚠️ This expense was already processed.")
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         async with AsyncSessionLocal() as session:
-            # Total sum
             res_total = await session.execute(
                 select(func.sum(Expense.amount)).where(Expense.chat_id == chat_id, Expense.is_verified == True)
             )
@@ -132,7 +147,6 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("📊 No verified expenses yet!")
                 return
 
-            # Per-person sum
             res_users = await session.execute(
                 select(User.name, func.sum(Expense.amount))
                 .join(Expense, User.telegram_id == Expense.payer_id)
@@ -142,7 +156,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_totals = res_users.all()
 
         num_people = len(user_totals)
-        share = total_spent / num_people
+        share = total_spent / num_people if num_people > 0 else 0 # 🛠️ Guard against ZeroDivision
         
         text = (
             f"📊 <b>Settlement Dashboard</b>\n"
