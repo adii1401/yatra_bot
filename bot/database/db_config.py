@@ -1,9 +1,9 @@
 import os
 from datetime import datetime
-from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.pool import NullPool  
+from sqlalchemy.pool import NullPool
 
 Base = declarative_base()
 
@@ -28,15 +28,14 @@ class TripGroup(Base):
     dest_lon = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-class Expense(Base):
-    __tablename__ = 'expenses'
+class GroupMember(Base):
+    __tablename__ = 'group_members'
     id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), nullable=False)
-    payer_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
-    amount = Column(Float, nullable=False)
-    description = Column(String, nullable=False)
-    is_verified = Column(Boolean, default=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
+    
+    # 🛠️ CONSTRAINT: Essential for on_conflict_do_nothing logic
+    __table_args__ = (UniqueConstraint('chat_id', 'user_id', name='_chat_user_uc'),)
 
 class UserLocation(Base):
     __tablename__ = 'user_locations'
@@ -47,37 +46,15 @@ class UserLocation(Base):
     longitude = Column(Float, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-class TripDocument(Base):
-    __tablename__ = 'trip_documents'
+class Expense(Base):
+    __tablename__ = 'expenses'
     id = Column(Integer, primary_key=True, autoincrement=True)
     chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), nullable=False)
-    uploader_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
-    file_id = Column(String, nullable=False)
-    file_type = Column(String, nullable=False)
-    caption = Column(String, nullable=True)
-    uploaded_at = Column(DateTime, default=datetime.utcnow)
-
-class GroupMember(Base):
-    __tablename__ = 'group_members'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), nullable=False)
-    user_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
-
-class Landmark(Base):
-    __tablename__ = 'landmarks'
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), nullable=False)
-    name = Column(String, nullable=False)
-    lat = Column(Float, nullable=False)
-    lon = Column(Float, nullable=False)
-    stay_info = Column(String)
-    food_info = Column(String)
-    sight_info = Column(String)
-
-class TripPlan(Base):
-    __tablename__ = 'trip_plans'
-    chat_id = Column(BigInteger, ForeignKey('trip_groups.chat_id', ondelete="CASCADE"), primary_key=True)
-    plan_text = Column(String, nullable=False)
+    payer_id = Column(BigInteger, ForeignKey('users.telegram_id', ondelete="CASCADE"), nullable=False)
+    amount = Column(Float, nullable=False)
+    description = Column(String, nullable=False)
+    is_verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 # ==========================================
 # CONNECTION SETUP
@@ -88,29 +65,25 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     DATABASE_URL = "sqlite+aiosqlite:///./yatra_bot.db"
 else:
-    # Ensure URL is clean and uses the asyncpg driver
+    # Standardize to asyncpg
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
-# SQLite config for local testing
 if DATABASE_URL.startswith("sqlite"):
-    engine = create_async_engine(
-        DATABASE_URL,
-        echo=False
-    )
-# Supabase config for production on Render
+    engine = create_async_engine(DATABASE_URL, echo=False)
 else:
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
-        poolclass=NullPool,  # Critical for Port 6543
-        # DISABLE the automatic "select pg_catalog.version()" check that is crashing
+        poolclass=NullPool,  # Best for Supavisor Transaction mode
         connect_args={
             "statement_cache_size": 0,
             "timeout": 60,
             "command_timeout": 60,
         }
     )
+    # 🛠️ THE CRITICAL FIX: Hardcode version on the SYNC engine to stop probe crashes
+    engine.sync_engine.dialect.server_version_info = (15, 0)
 
 AsyncSessionLocal = sessionmaker(
     bind=engine,
@@ -119,6 +92,7 @@ AsyncSessionLocal = sessionmaker(
 )
 
 async def init_db():
+    """Initializes tables and applies Autocommit for initial schema creation."""
     async with engine.begin() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         await conn.run_sync(Base.metadata.create_all)

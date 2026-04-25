@@ -3,9 +3,9 @@ import os
 import requests
 from telegram import Update
 from telegram.ext import ContextTypes
-from sqlalchemy.dialects.sqlite import insert
-from sqlalchemy import select
-from bot.database.db_config import AsyncSessionLocal, UserLocation, TripGroup, GroupMember # 🛡️ ADDED GroupMember
+from sqlalchemy.dialects.postgresql import insert as pg_insert # 🛠️ Correct PostgreSQL Dialect
+from sqlalchemy import select, func
+from bot.database.db_config import AsyncSessionLocal, UserLocation, TripGroup, GroupMember, User
 from bot.utils.logger import setup_logger
 from datetime import timedelta, datetime
 
@@ -23,13 +23,12 @@ def calculate_distance(lat1, lon1, lat2, lon2):
 # --- Handlers ---
 
 async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Saves user's location pin. Includes Multi-Tenant routing."""
+    """Saves user's location with FK guards and session flushing."""
     
     msg = update.message or update.edited_message
     if not msg or not msg.location:
         return
 
-    # 🛡️ THE FIX: Ensure it's in a group
     if msg.chat.type == 'private':
         await msg.reply_text("⚠️ Please share your location inside the Trip Group!")
         return
@@ -40,8 +39,24 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with AsyncSessionLocal() as session:
         async with session.begin():
-            # 1. Upsert Location
-            stmt = insert(UserLocation).values(
+            # 1. 🛡️ FK GUARD: Register User if missing
+            await session.execute(pg_insert(User).values(
+                telegram_id=user.id,
+                name=user.full_name,
+                username=user.username
+            ).on_conflict_do_nothing(index_elements=['telegram_id']))
+
+            # 2. 🛡️ FK GUARD: Register Trip Group if missing
+            await session.execute(pg_insert(TripGroup).values(
+                chat_id=chat_id,
+                trip_name=msg.chat.title or "New Expedition"
+            ).on_conflict_do_nothing(index_elements=['chat_id']))
+
+            # 🛠️ THE FIX: Flush parent rows to DB buffer so child rows (Location/Member) can find them
+            await session.flush()
+
+            # 3. Upsert Location
+            loc_stmt = pg_insert(UserLocation).values(
                 telegram_id=user.id,
                 name=user.first_name,
                 latitude=loc.latitude,
@@ -55,16 +70,18 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     'updated_at': datetime.utcnow()
                 }
             )
-            await session.execute(stmt)
+            await session.execute(loc_stmt)
 
-            # 2. 🛡️ THE FIX: Register User to THIS Group (Multi-Tenant)
-            member = await session.execute(select(GroupMember).where(GroupMember.chat_id == chat_id, GroupMember.user_id == user.id))
-            if not member.scalar_one_or_none():
-                session.add(GroupMember(chat_id=chat_id, user_id=user.id))
+            # 4. Register Membership
+            member_stmt = pg_insert(GroupMember).values(
+                chat_id=chat_id,
+                user_id=user.id
+            ).on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
+            await session.execute(member_stmt)
 
     if update.message:
         await update.message.reply_text(
-            f"📍 <b>{user.first_name}</b>: Check-in saved for this squad! 🏔️", 
+            f"📍 <b>{user.first_name}</b>: Check-in saved! 🏔️", 
             parse_mode='HTML'
         )
 
@@ -73,7 +90,6 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     
     async with AsyncSessionLocal() as session:
-        # 🛡️ THE FIX: Only select locations of users who are registered to THIS chat_id
         result = await session.execute(
             select(UserLocation)
             .join(GroupMember, UserLocation.telegram_id == GroupMember.user_id)
@@ -91,7 +107,6 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for loc in locations:
         ist_time = loc.updated_at + timedelta(hours=5, minutes=30)
         time_str = ist_time.strftime("%I:%M %p")
-        
         maps_url = f"https://www.google.com/maps?q={loc.latitude},{loc.longitude}"
         
         msg += f"👤 <b>{loc.name}</b>\n🕒 {time_str}\n📍 <a href='{maps_url}'>Track on Map</a>\n\n"
