@@ -103,11 +103,12 @@ else:
     engine = create_async_engine(
         DATABASE_URL,
         echo=False,
-        poolclass=NullPool,  # <--- This fixes the "Connection Closed" error
+        poolclass=NullPool,  # Critical for Port 6543
+        # DISABLE the automatic "select pg_catalog.version()" check that is crashing
         connect_args={
-            "statement_cache_size": 0,  # Keeps the pooler happy
+            "statement_cache_size": 0,
             "timeout": 60,
-            "command_timeout": 60
+            "command_timeout": 60,
         }
     )
 
@@ -119,4 +120,5 @@ AsyncSessionLocal = sessionmaker(
 
 async def init_db():
     async with engine.begin() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
         await conn.run_sync(Base.metadata.create_all)
