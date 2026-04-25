@@ -4,7 +4,8 @@ from sqlalchemy import Column, Integer, BigInteger, String, Float, Boolean, Date
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
-
+import logging # 🛠️ Add this
+logger = logging.getLogger("DatabaseConfig") # 🛠️ Add this
 Base = declarative_base()
 
 # ==========================================
@@ -114,15 +115,10 @@ AsyncSessionLocal = sessionmaker(
 )
 
 async def init_db():
-    """Initializes tables using a raw connection to allow isolation level adjustment."""
     try:
-        # 🛠️ THE FIX: Use .connect() to avoid the auto-started transaction from .begin()
         async with engine.connect() as conn:
-            # Set isolation level on the raw connection
             await conn.execution_options(isolation_level="AUTOCOMMIT")
-            # Run the schema creation
             await conn.run_sync(Base.metadata.create_all)
-            
-        logger.info("✅ Database Schema Synced Successfully")
+        logger.info("✅ Database Schema Synced Successfully") # <--- This was the trigger
     except Exception as e:
         logger.error(f"🚨 Database Init Error: {e}")
