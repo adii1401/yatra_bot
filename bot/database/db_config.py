@@ -114,6 +114,15 @@ AsyncSessionLocal = sessionmaker(
 )
 
 async def init_db():
-    async with engine.begin() as conn:
-        await conn.execution_options(isolation_level="AUTOCOMMIT")
-        await conn.run_sync(Base.metadata.create_all)
+    """Initializes tables using a raw connection to allow isolation level adjustment."""
+    try:
+        # 🛠️ THE FIX: Use .connect() to avoid the auto-started transaction from .begin()
+        async with engine.connect() as conn:
+            # Set isolation level on the raw connection
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            # Run the schema creation
+            await conn.run_sync(Base.metadata.create_all)
+            
+        logger.info("✅ Database Schema Synced Successfully")
+    except Exception as e:
+        logger.error(f"🚨 Database Init Error: {e}")
