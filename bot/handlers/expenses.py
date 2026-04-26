@@ -19,7 +19,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        amount = float(context.args[0])
+        # Polish: Convert 60.0 to 60 for cleaner group messages
+        amount_raw = float(context.args[0])
+        amount = int(amount_raw) if amount_raw.is_integer() else amount_raw
         description = " ".join(context.args[1:])
     except ValueError:
         await update.message.reply_text("⚠️ Amount must be a number.", parse_mode='HTML')
@@ -31,11 +33,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Ensure user and group are registered in the DB
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=update.message.chat.title).on_conflict_do_nothing(index_elements=['chat_id']))
                 
-                # Create the expense record
                 expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
                 session.add(expense)
                 await session.flush()
@@ -47,22 +47,29 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]
                 ]
                 
-                # 📢 Notify the group that the expense is logged and pending
-                await update.message.reply_text(f"💸 <b>{user.first_name}</b> logged ₹{amount} for {description}. Pending admin approval.")
+                # 📢 Polished Human Message for the Group
+                await update.message.reply_text(
+                    f"💳 <b>{user.first_name}</b> added <b>₹{amount}</b> for <i>{description}</i>.\n"
+                    f"Checking with admins... ⏳",
+                    parse_mode='HTML'
+                )
 
-                # 🔐 Notify Admins PRIVATELY (The approval buttons no longer appear in the group)
+                # 🔐 Notify Admins PRIVATELY
                 admins = await context.bot.get_chat_administrators(chat_id)
                 for admin in admins:
                     if not admin.user.is_bot:
                         try:
                             await context.bot.send_message(
                                 chat_id=admin.user.id,
-                                text=f"🛡️ <b>Expense Approval Request</b>\nGroup: {update.message.chat.title}\nUser: {user.full_name}\nAmount: ₹{amount}\nFor: {description}",
+                                text=f"🛡️ <b>New Expense for Approval</b>\n\n"
+                                     f"📍 Group: {update.message.chat.title}\n"
+                                     f"👤 Payer: {user.full_name}\n"
+                                     f"💰 Amount: ₹{amount}\n"
+                                     f"📝 Item: {description}",
                                 reply_markup=InlineKeyboardMarkup(keyboard),
                                 parse_mode='HTML'
                             )
                         except Exception:
-                            # Skip if the admin hasn't started a private chat with the bot
                             continue
     except Exception as e:
         logger.error(f"Expense save error: {e}")
@@ -88,12 +95,13 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
                     expense.is_verified = True
                     payer = await session.get(User, expense.payer_id)
                     payer_name = payer.name if payer else "Someone"
-                    msg = f"✅ Approved ₹{expense.amount} by {payer_name}"
+                    # Clean currency for approval msg too
+                    amt_display = int(expense.amount) if expense.amount % 1 == 0 else expense.amount
+                    msg = f"✅ Approved ₹{amt_display} for {expense.description} by {payer_name}"
                 else:
                     msg = f"❌ Rejected ₹{expense.amount}"
                     await session.delete(expense)
 
-        # Notify the original group chat of the outcome
         await query.edit_message_text(msg)
         await context.bot.send_message(chat_id=chat_id, text=msg)
     except Exception as e:
@@ -106,7 +114,7 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, member_count=count).on_conflict_do_update(index_elements=['chat_id'], set_={'member_count': count}))
-        await update.message.reply_text(f"✅ Total human group members set to {count} for splitting. (Excluding the bot)")
+        await update.message.reply_text(f"✅ Total group members set to {count} for splitting.")
     except Exception:
         await update.message.reply_text("⚠️ Usage: /set_members [number]")
 
@@ -114,11 +122,9 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     try:
         async with AsyncSessionLocal() as session:
-            # 1. Get the group member count (Manual count ensures the bot is not included)
             group = await session.get(TripGroup, chat_id)
             total_members = group.member_count if group and group.member_count and group.member_count > 0 else 1
 
-            # 2. Fetch all verified expenses
             expenses = (await session.execute(
                 select(Expense, User.name)
                 .join(User, Expense.payer_id == User.telegram_id)
@@ -129,11 +135,9 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📊 No verified expenses yet.")
             return
 
-        # 3. Calculate total and per-person share based on the human count
         total_spent = sum([row.Expense.amount for row in expenses])
         per_person = total_spent / total_members
 
-        # 4. Group totals by user
         user_totals = {}
         for row in expenses:
             user_totals[row.name] = user_totals.get(row.name, 0) + row.Expense.amount
