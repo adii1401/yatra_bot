@@ -23,4 +23,7 @@ COPY . .
 EXPOSE 10000
 
 # 8. Run the FastAPI server on port 10000
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "10000"]
+
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]

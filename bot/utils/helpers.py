@@ -1,7 +1,5 @@
 import re
 from datetime import datetime, timedelta
-from typing import Optional
-
 
 def parse_coordinate(raw: str) -> float:
     """
@@ -29,19 +27,10 @@ def parse_coordinate(raw: str) -> float:
 
     return round(decimal, 6)
 
-
-# ==========================================
-# DOUBLE-CLICK PROTECTION
-# Stores message_id → timestamp to prevent
-# two admins approving the same expense.
-# Auto-cleans entries older than 1 hour.
-# ==========================================
 _processed_messages: dict[int, datetime] = {}
 
-
 def is_already_processed(message_id: int) -> bool:
-    """Returns True if this message was already processed. Registers it if not."""
-    # Clean up stale entries to prevent memory leak
+    """Double-click protection for admin approvals."""
     cutoff = datetime.utcnow() - timedelta(hours=1)
     stale = [k for k, v in _processed_messages.items() if v < cutoff]
     for k in stale:
@@ -53,12 +42,10 @@ def is_already_processed(message_id: int) -> bool:
     _processed_messages[message_id] = datetime.utcnow()
     return False
 
-
 def unregister_message(message_id: int):
-    """Removes a message from processed set (called on failure to allow retry)."""
     _processed_messages.pop(message_id, None)
 
-
 def format_ist(utc_dt: datetime) -> str:
-    """Converts UTC datetime to IST string."""
+    """Converts UTC datetime to IST string for squad status."""
+    if not utc_dt: return "—"
     return (utc_dt + timedelta(hours=5, minutes=30)).strftime("%d %b, %I:%M %p")
