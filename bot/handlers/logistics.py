@@ -33,12 +33,10 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Ensure User and Group exist first
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=msg.chat.title or "Trip Group").on_conflict_do_nothing(index_elements=['chat_id']))
                 await session.flush()
 
-                # Update location
                 await session.execute(
                     pg_insert(UserLocation).values(
                         telegram_id=user.id, latitude=loc.latitude, longitude=loc.longitude, updated_at=datetime.utcnow()
@@ -48,7 +46,6 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
 
-                # Ensure group membership
                 await session.execute(
                     pg_insert(GroupMember).values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
@@ -58,8 +55,6 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📍 <b>{user.first_name}</b> checked in!", parse_mode='HTML')
     except Exception as e:
         logger.error(f"track_location error: {e}")
-        if update.message:
-            await update.message.reply_text("⚠️ Could not save your location.")
 
 async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -81,19 +76,36 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📍 <b>Squad Status</b>\n➖➖➖➖➖➖➖➖➖➖\n"
         for loc, user_name in locations:
             time_str = format_ist(loc.updated_at)
-            # 🚨 FIX: Official Universal Google Maps Link API 🚨
-            msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}'>Open on Maps</a>\n\n"
+            # 🚨 FIX: Official Universal Maps URL
+            maps_url = f"https://www.google.com/maps?q={loc.latitude},{loc.longitude}"
+            msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='{maps_url}'>Open on Maps</a>\n\n"
 
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"whereis error: {e}")
 
 async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Automatically finds coordinates using OpenStreetMap API.
-    Usage: /plan_trip Kedarnath
-    """
     chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
+    
+    # ADMIN SECURITY LOCK
+    try:
+        async with AsyncSessionLocal() as session:
+            group = await session.get(TripGroup, chat_id)
+            if group and group.destination_name:
+                try:
+                    admins = await context.bot.get_chat_administrators(chat_id)
+                    admin_ids = [admin.user.id for admin in admins]
+                    if user_id not in admin_ids:
+                        await update.message.reply_text(f"⚠️ A trip to <b>{group.destination_name}</b> is already planned!\nOnly group admins can change the destination.", parse_mode='HTML')
+                        return
+                except Exception as e:
+                    logger.error(f"Failed to fetch admins: {e}")
+                    await update.message.reply_text("⚠️ I need to be an Admin in this group to verify permissions before changing the destination.")
+                    return
+    except Exception as e:
+        logger.error(f"DB check error in plan_trip: {e}")
+
     if not context.args:
         await update.message.reply_text("⚠️ Usage: <code>/plan_trip Kedarnath</code>", parse_mode='HTML')
         return
@@ -102,14 +114,25 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Searching for <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
-        # SMART SEARCH: Find lat/lon by name
+        headers = {
+            "User-Agent": f"YatraBot_Expedition_Assistant_{chat_id}",
+            "Accept-Language": "en"
+        }
+        
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(url, headers={"User-Agent": "TripOS-Bot/1.0"})
+        
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers=headers)
+            
+            if resp.status_code != 200:
+                logger.error(f"Nominatim API Error: {resp.status_code}")
+                await status_msg.edit_text(f"❌ API Error. Please try again in 1 minute.")
+                return
+                
             data = resp.json()
 
         if not data:
-            await status_msg.edit_text(f"❌ Could not find '{search_query}'.")
+            await status_msg.edit_text(f"❌ Could not find '{search_query}'. Try a more general name.")
             return
 
         lat, lon = float(data[0]['lat']), float(data[0]['lon'])
@@ -117,22 +140,24 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                group = await session.get(TripGroup, chat_id)
-                if not group:
-                    group = TripGroup(chat_id=chat_id)
-                    session.add(group)
-                group.dest_lat, group.dest_lon = lat, lon
-                group.destination_name = dest_name
-                group.trip_name = f"{dest_name} Trip"
+                stmt = pg_insert(TripGroup).values(
+                    chat_id=chat_id, dest_lat=lat, dest_lon=lon,
+                    destination_name=dest_name, trip_name=f"{dest_name} Trip"
+                ).on_conflict_do_update(
+                    index_elements=['chat_id'],
+                    set_={'dest_lat': lat, 'dest_lon': lon, 'destination_name': dest_name, 'trip_name': f"{dest_name} Trip"}
+                )
+                await session.execute(stmt)
 
-        # 🚨 FIX: Official Universal Google Maps Link API 🚨
+        # 🚨 FIX: Official Universal Maps URL
+        maps_url = f"https://www.google.com/maps?q={lat},{lon}"
         await status_msg.edit_text(
-            f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='https://www.google.com/maps/search/?api=1&query={lat},{lon}'>View on Maps</a>",
+            f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='{maps_url}'>View on Maps</a>",
             parse_mode='HTML', disable_web_page_preview=True
         )
     except Exception as e:
         logger.error(f"plan_trip error: {e}")
-        await status_msg.edit_text("⚠️ Search failed. Try again later.")
+        await status_msg.edit_text("⚠️ Search timed out. Please try again.")
 
 async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -145,10 +170,17 @@ async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         api_key = os.getenv("WEATHER_API_KEY")
+        if not api_key:
+            await update.message.reply_text("⚠️ Weather API key is missing in server config.")
+            return
+
         url = f"https://api.openweathermap.org/data/2.5/weather?lat={group.dest_lat}&lon={group.dest_lon}&appid={api_key}&units=metric"
 
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url)
+            if resp.status_code != 200:
+                await update.message.reply_text("⚠️ Failed to fetch weather from the provider.")
+                return
             data = resp.json()
 
         temp = data['main']['temp']

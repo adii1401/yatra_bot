@@ -1,4 +1,3 @@
-import uuid
 import csv
 import io
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -30,152 +29,132 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
 
     try:
-        admins = await context.bot.get_chat_administrators(chat_id)
-    except Exception as e:
-        logger.error(f"Admin fetch error: {e}")
-        return
-
-    # 🛠️ FIX: Unique ID prevents memory overwrite race conditions
-    unique_id = str(uuid.uuid4())[:6]
-    context.bot_data[f"desc_{user.id}_{amount}_{unique_id}"] = description
-
-    async with AsyncSessionLocal() as session:
-        group = await session.get(TripGroup, chat_id)
-        trip_label = group.trip_name if group else "Trip Expense"
-
-    keyboard = [[
-        InlineKeyboardButton("✅ Approve", callback_data=f"appv_{chat_id}_{user.id}_{amount}_{unique_id}"),
-        InlineKeyboardButton("❌ Reject", callback_data=f"rejt_{chat_id}_{user.id}_{amount}_{unique_id}")
-    ]]
-
-    admin_msg = (
-        f"🔔 <b>Approval Required — {trip_label}</b>\n"
-        f"👤 <b>Who:</b> {user.first_name}\n"
-        f"💰 <b>Amount:</b> ₹{amount:,.2f}\n"
-        f"📝 <b>For:</b> {description}\n"
-    )
-
-    sent_count = 0
-    for admin in admins:
-        if not admin.user.is_bot:
-            try:
-                await context.bot.send_message(
-                    chat_id=admin.user.id,
-                    text=admin_msg,
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # Ensure user and group exist
+                await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
+                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=update.message.chat.title).on_conflict_do_nothing(index_elements=['chat_id']))
+                
+                # Create Expense
+                expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
+                session.add(expense)
+                await session.flush()
+                
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✅ Approve", callback_data=f"exp_yes_{expense.id}_{chat_id}"),
+                        InlineKeyboardButton("❌ Reject", callback_data=f"exp_no_{expense.id}_{chat_id}")
+                    ]
+                ]
+                await update.message.reply_text(
+                    f"💸 <b>{user.first_name}</b> logged an expense:\n\n"
+                    f"💰 Amount: ₹{amount}\n📝 For: {description}\n\n"
+                    f"Admins, please verify:",
                     reply_markup=InlineKeyboardMarkup(keyboard),
                     parse_mode='HTML'
                 )
-                sent_count += 1
-            except Exception:
-                continue
-
-    if sent_count == 0:
-        await update.message.reply_text("⚠️ Admins must <b>Start</b> the bot in DM first!", parse_mode='HTML')
-    else:
-        await update.message.reply_text(f"⏳ ₹{amount} sent to {sent_count} admins for approval.")
-
+    except Exception as e:
+        logger.error(f"Expense save error: {e}")
+        await update.message.reply_text("⚠️ Failed to record expense.")
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    data_parts = query.data.split("_")
-    action, target_chat_id, target_user_id, amount = data_parts[0], int(data_parts[1]), int(data_parts[2]), float(data_parts[3])
-    unique_id = data_parts[4] if len(data_parts) > 4 else ""
-    
-    if action == "rejt":
-        try:
-            await query.edit_message_text(f"❌ Rejected ₹{amount}.")
-            await context.bot.send_message(chat_id=target_chat_id, text=f"❌ Expense of ₹{amount} was rejected.")
-        except Exception as e:
-            logger.error(f"Rejection UI error: {e}")
-        return
+    data = query.data.split("_")
+    action = data[1]
+    expense_id = int(data[2])
+    chat_id = int(data[3])
 
-    if action == "appv":
-        desc_key = f"desc_{target_user_id}_{amount}_{unique_id}" if unique_id else f"desc_{target_user_id}_{amount}"
-        description = context.bot_data.get(desc_key, "Trip Expense")
-        
-        try:
-            user_info = await context.bot.get_chat(target_user_id)
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    await session.execute(pg_insert(TripGroup).values(chat_id=target_chat_id).on_conflict_do_nothing(index_elements=['chat_id']))
-                    await session.execute(pg_insert(User).values(telegram_id=target_user_id, name=user_info.first_name, username=getattr(user_info, 'username', None)).on_conflict_do_nothing(index_elements=['telegram_id']))
-                    await session.flush()
-                    session.add(Expense(
-                        chat_id=target_chat_id, 
-                        payer_id=target_user_id, 
-                        amount=amount, 
-                        description=description, 
-                        is_verified=True
-                    ))
-            
+    amount = 0
+    desc = ""
+    payer_name = "Someone"
+
+    try:
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                expense = await session.get(Expense, expense_id)
+                if not expense:
+                    await query.edit_message_text("⚠️ This expense was not found or already deleted.")
+                    return
+
+                if action == "yes":
+                    expense.is_verified = True
+                    amount = expense.amount
+                    desc = expense.description
+                    payer = await session.get(User, expense.payer_id)
+                    if payer: payer_name = payer.name
+                else:
+                    await session.delete(expense)
+                    amount = expense.amount
+
+        # 🚨 Executed OUTSIDE DB transaction to prevent hangs
+        if action == "yes":
+            await query.edit_message_text(f"✅ Approved ₹{amount} for '{desc}'")
             try:
-                await query.edit_message_text(f"✅ Approved ₹{amount}")
                 await context.bot.send_message(
-                    chat_id=target_chat_id, 
-                    text=f"✅ <b>{query.from_user.first_name}</b> approved ₹{amount} for <b>{user_info.first_name}</b>.", 
+                    chat_id=chat_id,
+                    text=f"✅ <b>Expense Approved</b>\n₹{amount} by {payer_name} for '{desc}'",
                     parse_mode='HTML'
                 )
             except Exception as e:
-                if "Message is not modified" in str(e): pass
-                else: raise e
+                logger.error(f"Failed to notify group: {e}")
+        else:
+            await query.edit_message_text(f"❌ Rejected ₹{amount}")
 
-        except Exception as e:
-            logger.error(f"Approval error: {e}")
-            if "duplicate key" not in str(e).lower():
-                await query.edit_message_text("❌ Database error during approval.")
-
-
-async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
-    actual_count = (await context.bot.get_chat_member_count(chat_id)) - 1
-    
-    async with AsyncSessionLocal() as session:
-        res_total = await session.execute(select(func.sum(Expense.amount)).where(Expense.chat_id == chat_id, Expense.is_verified == True))
-        total = res_total.scalar() or 0
-        
-        res_users = await session.execute(
-            select(User.name, func.sum(Expense.amount))
-            .join(Expense, User.telegram_id == Expense.payer_id)
-            .where(Expense.chat_id == chat_id, Expense.is_verified == True)
-            .group_by(User.name)
-        )
-        user_totals = res_users.all()
-
-    share = total / actual_count if actual_count > 0 else 0
-
-    msg = (
-        f"🏔️ <b>EXPEDITION SETTLEMENT</b>\n"
-        f"<code>━━━━━━━━━━━━━━━━━━</code>\n"
-        f"💰 <b>Total Spent:</b>  ₹{total:,.2f}\n"
-        f"👥 <b>Group Size:</b>   {actual_count} members\n"
-        f"⚖️ <b>Per Head:</b>     ₹{share:,.2f}\n"
-        f"<code>━━━━━━━━━━━━━━━━━━</code>\n\n"
-    )
-    
-    for name, paid in user_totals:
-        diff = paid - share
-        icon = "🟢" if diff >= 0 else "🔴"
-        msg += f"{icon} <b>{name[:12]:<12}</b>: {'+' if diff >= 0 else ''}₹{diff:,.2f}\n"
-    
-    await update.message.reply_text(msg, parse_mode='HTML')
-
+    except Exception as e:
+        logger.error(f"Expense Callback Error: {e}")
+        await query.edit_message_text("⚠️ An error occurred processing this request.")
 
 async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    chat_id = update.message.chat.id
     try:
         count = int(context.args[0])
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                group = await session.get(TripGroup, update.message.chat_id)
-                if group: group.member_count = count
-        await update.message.reply_text(f"✅ Group size set to {count} for settlements.")
-    except ValueError:
-        pass
+                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, member_count=count).on_conflict_do_update(index_elements=['chat_id'], set_={'member_count': count}))
+        await update.message.reply_text(f"✅ Total group members set to {count} for splitting.")
+    except Exception:
+        await update.message.reply_text("⚠️ Usage: /set_members [number]")
 
+async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat.id
+    try:
+        async with AsyncSessionLocal() as session:
+            group = await session.get(TripGroup, chat_id)
+            total_members = group.member_count if group and group.member_count else 1
 
-# 🛠️ NEW: Export expenses to CSV
+            expenses = (await session.execute(
+                select(Expense, User.name)
+                .join(User, Expense.payer_id == User.telegram_id)
+                .where(Expense.chat_id == chat_id, Expense.is_verified == True)
+            )).all()
+
+        if not expenses:
+            await update.message.reply_text("📊 No verified expenses yet.")
+            return
+
+        total_spent = sum([row.Expense.amount for row in expenses])
+        per_person = total_spent / total_members
+
+        user_totals = {}
+        for row in expenses:
+            user_totals[row.name] = user_totals.get(row.name, 0) + row.Expense.amount
+
+        msg = f"📊 <b>Trip Expenses</b>\n➖➖➖➖➖➖➖➖➖➖\n"
+        msg += f"💰 Total Spent: ₹{total_spent:,.2f}\n"
+        msg += f"👥 Per Person ({total_members}): ₹{per_person:,.2f}\n\n"
+        
+        for name, paid in user_totals.items():
+            diff = paid - per_person
+            status = f"🟢 Gets back ₹{diff:,.2f}" if diff >= 0 else f"🔴 Owes ₹{abs(diff):,.2f}"
+            msg += f"👤 <b>{name}</b> (Paid: ₹{paid:,.2f})\n   {status}\n\n"
+
+        await update.message.reply_text(msg, parse_mode='HTML')
+    except Exception as e:
+        logger.error(f"Balance error: {e}")
+        await update.message.reply_text("⚠️ Error calculating balances.")
+
 async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type == 'private': return
     chat_id = update.message.chat.id
@@ -210,11 +189,4 @@ async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
         writer.writerow([dt, row.name, row.Expense.amount, row.Expense.description])
 
     output.seek(0)
-    csv_bytes = bytes(output.getvalue(), 'utf-8')
-    
-    await update.message.reply_document(
-        document=csv_bytes, 
-        filename="Trip_Expenses_Export.csv",
-        caption="📊 <b>Complete Expense Ledger</b>",
-        parse_mode="HTML"
-    )
+    await context.bot.send_document(chat_id=chat_id, document=io.BytesIO(output.getvalue().encode()), filename="trip_expenses.csv")
