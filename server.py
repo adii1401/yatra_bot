@@ -35,17 +35,28 @@ logger = setup_logger("MasterServer")
 limiter = Limiter(key_func=get_remote_address)
 
 async def start(update: Update, context):
-    """Standard welcome command (Personal Chat Only)."""
+    """Standard welcome command."""
+    # 🚨 User-Friendly warning if used in the group
+    if update.message.chat.type != 'private':
+        await update.message.reply_text("👋 Hi! I'm Trip OS. Please send me a private message to see my setup guide.", parse_mode='HTML')
+        return
+
     await update.message.reply_text(
         "🏔️ <b>Welcome to Trip OS!</b>\n\n"
         "I am your expedition assistant. I manage expenses, "
         "track locations, and keep your squad synced.\n\n"
-        "To get started, add me to your trip's Telegram group and type <code>/plan_trip</code>.",
+        "Use <code>/help</code> to see the full list of commands.\n"
+        "To begin, create a Telegram Group for your trip, add me to it, and make me an Admin!",
         parse_mode='HTML'
     )
 
 async def help_command(update: Update, context):
-    """Shows the help manual (Personal Chat Only)."""
+    """Shows the help manual."""
+    # 🚨 User-Friendly warning if used in the group
+    if update.message.chat.type != 'private':
+        await update.message.reply_text("⚠️ To keep the group chat clean, I only send the manual in private messages. Please DM me /help!", parse_mode='HTML')
+        return
+
     await update.message.reply_text(
         "🏔️ <b>Trip OS Manual</b>\n\n"
         "<b>Group Commands (Use in the Trip Group):</b>\n"
@@ -66,7 +77,7 @@ async def help_command(update: Update, context):
     )
 
 async def get_dashboard_link(update: Update, context):
-    """Generates the dashboard link and DMs it to admins."""
+    """Generates the dashboard link and posts it in the group."""
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
 
@@ -77,34 +88,27 @@ async def get_dashboard_link(update: Update, context):
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
         if user_id not in [admin.user.id for admin in admins]:
-            await update.message.reply_text("⚠️ Only group admins can access the dashboard link.")
+            await update.message.reply_text("⚠️ Only group admins can generate the dashboard link.")
             return
     except Exception:
         await update.message.reply_text("⚠️ Make me an Admin so I can verify your permissions!")
         return
 
-    # Build and send the secure URL
+    # 🚨 Now posts directly to the group chat instead of DMs
     dashboard_url = f"https://yatra-bot.onrender.com/?chat_id={chat_id}"
-    try:
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"📊 <b>Your Trip Dashboard</b>\n\nSecure admin link:\n{dashboard_url}",
-            parse_mode='HTML'
-        )
-        await update.message.reply_text("✅ I have sent the dashboard link securely to your DMs!")
-    except Exception:
-        await update.message.reply_text("⚠️ I couldn't DM you! Send me a private message first, then try again.")
+    await update.message.reply_text(
+        f"📊 <b>Your Trip Dashboard</b>\n\nHere is the admin link for this group:\n{dashboard_url}",
+        parse_mode='HTML',
+        disable_web_page_preview=True
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Initialize Database
     logger.info("🗄️ Initializing Database...")
     await init_db()
     
-    # 2. Initialize Telegram Bot
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
     
-    # FIX: Corrected the logic gate to only start if Token exists
     if not TOKEN:
         logger.critical("❌ No TELEGRAM_BOT_TOKEN found. Bot will not start.")
     else:
@@ -112,11 +116,11 @@ async def lifespan(app: FastAPI):
             logger.info("🤖 Starting Telegram Bot Polling...")
             bot_app = Application.builder().token(TOKEN).build()
             
-            # 🛑 PERSONAL CHAT COMMANDS (Only work in DMs)
-            bot_app.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
-            bot_app.add_handler(CommandHandler("help", help_command, filters=filters.ChatType.PRIVATE))
+            # 🛑 PERSONAL CHAT COMMANDS (Filters removed so they can reply gracefully in groups)
+            bot_app.add_handler(CommandHandler("start", start))
+            bot_app.add_handler(CommandHandler("help", help_command))
             
-            # 🌍 GROUP CHAT COMMANDS (Only work in the Trip Group)
+            # 🌍 GROUP CHAT COMMANDS
             bot_app.add_handler(CommandHandler("plan_trip", plan_trip, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("whereis", where_is_everyone, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("weather", get_weather, filters=filters.ChatType.GROUPS))
@@ -140,7 +144,6 @@ async def lifespan(app: FastAPI):
             bot_app.add_handler(CallbackQueryHandler(handle_sos_callback, pattern="^sos_"))
             bot_app.add_handler(CallbackQueryHandler(get_vault_file, pattern="^getv_"))
             
-            # Initialize and Start
             await bot_app.initialize()
             await bot_app.start()
             await bot_app.updater.start_polling(drop_pending_updates=True)
@@ -151,7 +154,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # 3. Shutdown
     if TOKEN and hasattr(app.state, 'bot_app'):
         logger.info("🛑 Shutting down Bot...")
         await app.state.bot_app.updater.stop()

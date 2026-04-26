@@ -50,7 +50,6 @@ async def packing_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_packing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # 🚨 FIX: Stops the infinite loading spinner on Telegram buttons
     await query.answer() 
     
     item_id = int(query.data.split("_")[1])
@@ -62,7 +61,6 @@ async def handle_packing_callback(update: Update, context: ContextTypes.DEFAULT_
             item = await session.get(PackingItem, item_id)
             if not item: return
             
-            # Toggle state
             if item.is_checked:
                 item.is_checked = False
                 item.checked_by = None
@@ -84,8 +82,6 @@ async def handle_packing_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def add_landmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message
-    
-    # 🚨 FIX: Ensure the user is replying to a location message
     if not msg.reply_to_message or not msg.reply_to_message.location:
         await msg.reply_text("⚠️ You must REPLY to a location pin with /add_landmark [name]")
         return
@@ -95,7 +91,6 @@ async def add_landmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     name = " ".join(context.args)
-    # Extract coordinates from the message being replied to
     lat = msg.reply_to_message.location.latitude
     lon = msg.reply_to_message.location.longitude
     chat_id = msg.chat_id
@@ -127,7 +122,7 @@ async def explore_nearby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "🗺️ <b>Nearby Landmarks</b>\n\n"
         for lm in landmarks:
             dist = calculate_distance(loc.latitude, loc.longitude, lm.latitude, lm.longitude)
-            if dist < 10000:  # Within 10km
+            if dist < 10000:
                 msg += f"📍 <b>{lm.name}</b> - {dist/1000:.1f} km away\n"
         
         if msg == "🗺️ <b>Nearby Landmarks</b>\n\n":
@@ -138,17 +133,34 @@ async def explore_nearby(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"explore error: {e}")
 
 async def sos_emergency(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat.id
-    user_name = update.message.from_user.first_name
+    chat_id = update.message.chat_id
+    user = update.message.from_user
+    
+    # 🔍 Fetch the user's last known location from the database
+    async with AsyncSessionLocal() as session:
+        loc = (await session.execute(
+            select(UserLocation).where(UserLocation.telegram_id == user.id)
+        )).scalar_one_or_none()
     
     keyboard = [[InlineKeyboardButton("✅ Mark as Safe / Resolve", callback_data=f"sos_{chat_id}")]]
     
+    # 🚨 Build the emergency message with location link
+    msg = f"🚨 <b>SOS ALERT TRIGGERED</b> 🚨\n\n<b>{user.first_name}</b> has signaled an emergency!\n"
+    
+    if loc:
+        # Generate a standard universal maps link
+        maps_url = f"http://maps.google.com/maps?q={loc.latitude},{loc.longitude}"
+        msg += f"📍 Last Known Location: <a href='{maps_url}'>Open on Maps</a>\n"
+    else:
+        msg += "⚠️ <i>No GPS coordinates found for this user.</i>\n"
+        
+    msg += "\nAll squad members please check in immediately."
+
     await update.message.reply_text(
-        f"🚨 <b>SOS ALERT TRIGGERED</b> 🚨\n\n"
-        f"<b>{user_name}</b> has signaled an emergency!\n"
-        f"All squad members please check in immediately.",
+        msg,
         reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='HTML'
+        parse_mode='HTML',
+        disable_web_page_preview=True
     )
 
 async def handle_sos_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):

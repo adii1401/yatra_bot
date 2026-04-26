@@ -31,11 +31,11 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                # Ensure user and group exist
+                # Ensure user and group are registered in the DB
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=update.message.chat.title).on_conflict_do_nothing(index_elements=['chat_id']))
                 
-                # Create Expense
+                # Create the expense record
                 expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
                 session.add(expense)
                 await session.flush()
@@ -46,16 +46,26 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("❌ Reject", callback_data=f"exp_no_{expense.id}_{chat_id}")
                     ]
                 ]
-                await update.message.reply_text(
-                    f"💸 <b>{user.first_name}</b> logged an expense:\n\n"
-                    f"💰 Amount: ₹{amount}\n📝 For: {description}\n\n"
-                    f"Admins, please verify:",
-                    reply_markup=InlineKeyboardMarkup(keyboard),
-                    parse_mode='HTML'
-                )
+                
+                # 📢 Notify the group that the expense is logged and pending
+                await update.message.reply_text(f"💸 <b>{user.first_name}</b> logged ₹{amount} for {description}. Pending admin approval.")
+
+                # 🔐 Notify Admins PRIVATELY (The approval buttons no longer appear in the group)
+                admins = await context.bot.get_chat_administrators(chat_id)
+                for admin in admins:
+                    if not admin.user.is_bot:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=admin.user.id,
+                                text=f"🛡️ <b>Expense Approval Request</b>\nGroup: {update.message.chat.title}\nUser: {user.full_name}\nAmount: ₹{amount}\nFor: {description}",
+                                reply_markup=InlineKeyboardMarkup(keyboard),
+                                parse_mode='HTML'
+                            )
+                        except Exception:
+                            # Skip if the admin hasn't started a private chat with the bot
+                            continue
     except Exception as e:
         logger.error(f"Expense save error: {e}")
-        await update.message.reply_text("⚠️ Failed to record expense.")
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -66,45 +76,28 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
     expense_id = int(data[2])
     chat_id = int(data[3])
 
-    amount = 0
-    desc = ""
-    payer_name = "Someone"
-
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 expense = await session.get(Expense, expense_id)
                 if not expense:
-                    await query.edit_message_text("⚠️ This expense was not found or already deleted.")
+                    await query.edit_message_text("⚠️ Expense not found.")
                     return
 
                 if action == "yes":
                     expense.is_verified = True
-                    amount = expense.amount
-                    desc = expense.description
                     payer = await session.get(User, expense.payer_id)
-                    if payer: payer_name = payer.name
+                    payer_name = payer.name if payer else "Someone"
+                    msg = f"✅ Approved ₹{expense.amount} by {payer_name}"
                 else:
+                    msg = f"❌ Rejected ₹{expense.amount}"
                     await session.delete(expense)
-                    amount = expense.amount
 
-        # 🚨 Executed OUTSIDE DB transaction to prevent hangs
-        if action == "yes":
-            await query.edit_message_text(f"✅ Approved ₹{amount} for '{desc}'")
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"✅ <b>Expense Approved</b>\n₹{amount} by {payer_name} for '{desc}'",
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify group: {e}")
-        else:
-            await query.edit_message_text(f"❌ Rejected ₹{amount}")
-
+        # Notify the original group chat of the outcome
+        await query.edit_message_text(msg)
+        await context.bot.send_message(chat_id=chat_id, text=msg)
     except Exception as e:
-        logger.error(f"Expense Callback Error: {e}")
-        await query.edit_message_text("⚠️ An error occurred processing this request.")
+        logger.error(f"Callback Error: {e}")
 
 async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
@@ -113,7 +106,7 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, member_count=count).on_conflict_do_update(index_elements=['chat_id'], set_={'member_count': count}))
-        await update.message.reply_text(f"✅ Total group members set to {count} for splitting.")
+        await update.message.reply_text(f"✅ Total human group members set to {count} for splitting. (Excluding the bot)")
     except Exception:
         await update.message.reply_text("⚠️ Usage: /set_members [number]")
 
@@ -121,9 +114,11 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     try:
         async with AsyncSessionLocal() as session:
+            # 1. Get the group member count (Manual count ensures the bot is not included)
             group = await session.get(TripGroup, chat_id)
-            total_members = group.member_count if group and group.member_count else 1
+            total_members = group.member_count if group and group.member_count and group.member_count > 0 else 1
 
+            # 2. Fetch all verified expenses
             expenses = (await session.execute(
                 select(Expense, User.name)
                 .join(User, Expense.payer_id == User.telegram_id)
@@ -134,16 +129,19 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("📊 No verified expenses yet.")
             return
 
+        # 3. Calculate total and per-person share based on the human count
         total_spent = sum([row.Expense.amount for row in expenses])
         per_person = total_spent / total_members
 
+        # 4. Group totals by user
         user_totals = {}
         for row in expenses:
             user_totals[row.name] = user_totals.get(row.name, 0) + row.Expense.amount
 
         msg = f"📊 <b>Trip Expenses</b>\n➖➖➖➖➖➖➖➖➖➖\n"
+        msg += f"👥 Splitting between: <b>{total_members} people</b>\n"
         msg += f"💰 Total Spent: ₹{total_spent:,.2f}\n"
-        msg += f"👥 Per Person ({total_members}): ₹{per_person:,.2f}\n\n"
+        msg += f"💸 Equal Share: ₹{per_person:,.2f}\n\n"
         
         for name, paid in user_totals.items():
             diff = paid - per_person
@@ -159,14 +157,12 @@ async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type == 'private': return
     chat_id = update.message.chat.id
     
-    # Check if admin
     try:
         admins = await context.bot.get_chat_administrators(chat_id)
         if update.message.from_user.id not in [a.user.id for a in admins]:
             await update.message.reply_text("⚠️ Only admins can export data.")
             return
-    except Exception:
-        pass
+    except Exception: pass
 
     async with AsyncSessionLocal() as session:
         expenses = (await session.execute(
