@@ -1,4 +1,4 @@
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -10,46 +10,75 @@ logger = setup_logger("VaultHandler")
 async def save_to_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = update.message.caption or ""
     if "#vault" not in caption.lower(): return
+    
     chat_id, user = update.message.chat_id, update.message.from_user
-    file_id, file_type = (update.message.document.file_id, "document") if update.message.document else (update.message.photo[-1].file_id, "photo") if update.message.photo else (None, None)
-    if not file_id: return
-    clean_caption = caption.replace("#vault", "").strip() or f"File from {user.first_name}"
+    is_doc = "#doc" in caption.lower()
+    
+    # 🛠️ FIX: Detect media groups to prevent spam messages
+    silent = False
+    if update.message.media_group_id:
+        group_id = update.message.media_group_id
+        if context.bot_data.get(f"mg_{group_id}"):
+            silent = True 
+        else:
+            context.bot_data[f"mg_{group_id}"] = True
+            
+    if update.message.document:
+        file_id = update.message.document.file_id
+        file_type = "doc" if is_doc else "photo_file"
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id 
+        file_type = "doc" if is_doc else "photo"
+    else:
+        return
+    
+    clean_caption = caption.lower().replace("#vault", "").replace("#doc", "").strip() or f"Upload_{user.first_name}"
+    
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
-                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=update.message.chat.title or "New Trip").on_conflict_do_nothing(index_elements=['chat_id']))
+                await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name).on_conflict_do_nothing(index_elements=['telegram_id']))
+                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id).on_conflict_do_nothing(index_elements=['chat_id']))
                 await session.flush()
-                session.add(TripDocument(chat_id=chat_id, uploader_id=user.id, file_id=file_id, file_type=file_type, caption=clean_caption))
-        await update.message.reply_text(f"🔒 <b>{clean_caption}</b> secured!", parse_mode='HTML')
+                
+                session.add(TripDocument(
+                    chat_id=chat_id, uploader_id=user.id, file_id=file_id, 
+                    file_type=file_type, caption=clean_caption
+                ))
+        
+        if not silent:
+            icon = "📂" if is_doc else "📸"
+            await update.message.reply_text(f"{icon} <b>{clean_caption}</b> secured in full quality!", parse_mode='HTML')
     except Exception as e:
         logger.error(f"vault error: {e}")
+
 
 async def open_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         async with AsyncSessionLocal() as session:
-            docs = (await session.execute(select(TripDocument, User.name).join(User, TripDocument.uploader_id == User.telegram_id).where(TripDocument.chat_id == chat_id).order_by(TripDocument.uploaded_at.desc()))).all()
+            docs = (await session.execute(select(TripDocument).where(TripDocument.chat_id == chat_id, TripDocument.file_type == "doc"))).scalars().all()
+        
         if not docs:
-            await update.message.reply_text("🗄️ Vault is empty.")
+            await update.message.reply_text("🗄️ No important documents found.")
             return
-        msg = "🗄️ <b>Vault</b>\n"
-        for row in docs:
-            msg += f"{('📄' if row.TripDocument.file_type == 'document' else '📸')} <b>{row.TripDocument.caption}</b>\n👉 <code>/get {row.TripDocument.id}</code>\n\n"
-        await update.message.reply_text(msg, parse_mode='HTML')
+
+        for doc in docs:
+            keyboard = [[InlineKeyboardButton(f"📥 Get {doc.caption}", callback_data=f"getv_{doc.id}")]]
+            await update.message.reply_text(f"📄 {doc.caption}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
     except Exception as e:
         logger.error(f"open_vault error: {e}")
 
 async def get_vault_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args: return
+    query = update.callback_query
+    await query.answer()
+    
+    doc_id = int(query.data.split("_")[1])
     try:
-        doc_id = int(context.args[0])
         async with AsyncSessionLocal() as session:
             doc = await session.get(TripDocument, doc_id)
-        if not doc or doc.chat_id != update.message.chat_id: return
-        if doc.file_type == "document":
-            await context.bot.send_document(chat_id=update.message.chat_id, document=doc.file_id, caption=doc.caption)
-        else:
-            await context.bot.send_photo(chat_id=update.message.chat_id, photo=doc.file_id, caption=doc.caption)
+        
+        if not doc or doc.chat_id != query.message.chat_id: return
+        await context.bot.send_document(chat_id=query.message.chat_id, document=doc.file_id, caption=f"📄 {doc.caption}")
     except Exception as e:
-        logger.error(f"get_vault error: {e}")
+        logger.error(f"Vault retrieval error: {e}")
