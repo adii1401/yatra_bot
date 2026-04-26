@@ -38,7 +38,7 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=msg.chat.title or "Trip Group").on_conflict_do_nothing(index_elements=['chat_id']))
                 await session.flush()
 
-                # 🛠️ FIX: Removed 'name' column from UserLocation to match schema
+                # Update location
                 await session.execute(
                     pg_insert(UserLocation).values(
                         telegram_id=user.id, latitude=loc.latitude, longitude=loc.longitude, updated_at=datetime.utcnow()
@@ -48,7 +48,7 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
 
-                # 🛠️ FIX: Use specific constraint name for group members
+                # Ensure group membership
                 await session.execute(
                     pg_insert(GroupMember).values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
@@ -65,7 +65,6 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     try:
         async with AsyncSessionLocal() as session:
-            # 🛠️ FIX: Joins User table to get the name safely since it's not in UserLocation anymore
             result = await session.execute(
                 select(UserLocation, User.name)
                 .join(User, UserLocation.telegram_id == User.telegram_id)
@@ -82,7 +81,8 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📍 <b>Squad Status</b>\n➖➖➖➖➖➖➖➖➖➖\n"
         for loc, user_name in locations:
             time_str = format_ist(loc.updated_at)
-            msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='http://maps.google.com/?q={loc.latitude},{loc.longitude}'>Open on Maps</a>\n\n"
+            # 🚨 FIX: Official Universal Google Maps Link API 🚨
+            msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}'>Open on Maps</a>\n\n"
 
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
@@ -90,7 +90,7 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    🛠️ UPGRADE: Automatically finds coordinates using OpenStreetMap API.
+    Automatically finds coordinates using OpenStreetMap API.
     Usage: /plan_trip Kedarnath
     """
     chat_id = update.message.chat_id
@@ -102,7 +102,7 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Searching for <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
-        # 🛠️ SMART SEARCH: Find lat/lon by name
+        # SMART SEARCH: Find lat/lon by name
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, headers={"User-Agent": "TripOS-Bot/1.0"})
@@ -121,13 +121,13 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not group:
                     group = TripGroup(chat_id=chat_id)
                     session.add(group)
-                # 🛠️ FIX: Update re-added coordinate columns
                 group.dest_lat, group.dest_lon = lat, lon
                 group.destination_name = dest_name
                 group.trip_name = f"{dest_name} Trip"
 
+        # 🚨 FIX: Official Universal Google Maps Link API 🚨
         await status_msg.edit_text(
-            f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='http://maps.google.com/?q={lat},{lon}'>View on Maps</a>",
+            f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='https://www.google.com/maps/search/?api=1&query={lat},{lon}'>View on Maps</a>",
             parse_mode='HTML', disable_web_page_preview=True
         )
     except Exception as e:

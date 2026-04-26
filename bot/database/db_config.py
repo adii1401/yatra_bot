@@ -47,8 +47,8 @@ class TripGroup(Base):
     chat_id = Column(BigInteger, primary_key=True, index=True)
     trip_name = Column(String, nullable=True)
     destination_name = Column(String, nullable=True)
-    dest_lat = Column(Float, nullable=True)  # 🛠️ Re-added for weather/geocoding support
-    dest_lon = Column(Float, nullable=True)  # 🛠️ Re-added for weather/geocoding support
+    dest_lat = Column(Float, nullable=True) 
+    dest_lon = Column(Float, nullable=True) 
     member_count = Column(Integer, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -59,7 +59,6 @@ class GroupMember(Base):
     user_id = Column(BigInteger, ForeignKey("users.telegram_id"))
     joined_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # 🛠️ Constraint to prevent duplicate membership crashes
     __table_args__ = (UniqueConstraint('chat_id', 'user_id', name='_chat_user_uc'),)
 
 class UserLocation(Base):
@@ -95,14 +94,33 @@ class TripPlan(Base):
     plan_text = Column(String)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
+# 👇 THESE WERE MISSING 👇
+class TripDocument(Base):
+    __tablename__ = "trip_documents"
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(BigInteger, ForeignKey("trip_groups.chat_id"))
+    uploader_id = Column(BigInteger, ForeignKey("users.telegram_id"))
+    file_id = Column(String)
+    file_type = Column(String)
+    caption = Column(String, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Landmark(Base):
+    __tablename__ = "landmarks"
+    id = Column(Integer, primary_key=True, index=True)
+    chat_id = Column(BigInteger, ForeignKey("trip_groups.chat_id"))
+    name = Column(String)
+    latitude = Column(Float)
+    longitude = Column(Float)
+    notes = Column(String, nullable=True)
+# 👆 ======================= 👆
+
 # ================= DB INITIALIZATION =================
 
 async def init_db():
-    """Initializes database schema. Uses Alembic for production (Postgres)."""
     if DATABASE_URL.startswith("sqlite"):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
     else:
-        # Pings Supabase to ensure connection is live without conflicting with PgBouncer
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
