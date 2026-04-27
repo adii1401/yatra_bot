@@ -184,7 +184,9 @@ async def lifespan(app: FastAPI):
             start_scheduler(bot_app)
             
             await bot_app.start()
+            await bot_app.bot.delete_webhook(drop_pending_updates=True)
             await bot_app.updater.start_polling(drop_pending_updates=True)
+            app.state.bot_app = bot_app 
             logger.info("✅ Bot is live and listening for messages.")
         except Exception as e:
             logger.error(f"❌ Bot failed to start: {e}")
