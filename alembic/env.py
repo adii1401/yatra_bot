@@ -56,12 +56,28 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        # Run the synchronous migrations inside an async context wrapper
-        await connection.run_sync(do_run_migrations)
+    # 🚨 FIX: Supabase Cold-Start Retry Loop for Migrations
+    for attempt in range(3):
+        try:
+            async with connectable.connect() as connection:
+                # Run the synchronous migrations inside an async context wrapper
+                await connection.run_sync(do_run_migrations)
+            
+            # If we reach here, migrations succeeded! Break the loop.
+            break 
+            
+        except Exception as e:
+            is_timeout = isinstance(e, (TimeoutError, asyncio.CancelledError)) or "timeout" in str(e).lower()
+            if is_timeout and attempt < 2:
+                print(f"🔄 Supabase is waking up... Migration timeout (Attempt {attempt + 1}/3). Retrying in 3s...")
+                await asyncio.sleep(3)
+                continue
+            
+            # If we run out of retries or it's a different error, crash normally
+            print(f"❌ Migration failed: {e}")
+            raise
 
     await connectable.dispose()
-
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
