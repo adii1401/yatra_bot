@@ -3,7 +3,7 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
 
-# 🛠️ Import your database URL from config
+# 🛠️ Import your database URL and Base from your config
 from bot.database.db_config import DATABASE_URL, Base
 
 config = context.config
@@ -18,12 +18,13 @@ def get_migration_url():
     1. Removes '+asyncpg'
     2. Converts '?ssl=require' to '?sslmode=require'
     """
+    # Use the raw DATABASE_URL from your config
     url = DATABASE_URL.replace("+asyncpg", "")
     if "ssl=require" in url:
         url = url.replace("ssl=require", "sslmode=require")
     return url
 
-# Set the corrected URL for Alembic
+# 🚨 THE FIX: Use the function result instead of a raw env var replace
 config.set_main_option("sqlalchemy.url", get_migration_url())
 
 def run_migrations_offline() -> None:
