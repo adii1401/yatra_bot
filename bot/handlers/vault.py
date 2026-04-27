@@ -40,7 +40,7 @@ async def save_to_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with AsyncSessionLocal() as session:
             async with session.begin():
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name).on_conflict_do_nothing(index_elements=['telegram_id']))
-                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id).on_conflict_do_nothing(index_elements=['chat_id']))
+                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id,trip_name="Trip Group").on_conflict_do_nothing(index_elements=['chat_id']))
                 await session.flush()
                 
                 session.add(TripDocument(

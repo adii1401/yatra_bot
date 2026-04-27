@@ -2,7 +2,7 @@
 import uuid
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -30,16 +30,18 @@ from bot.handlers.vault import save_to_vault, open_vault, get_vault_file
 from bot.handlers.scheduler import start_scheduler
 from bot.utils.logger import setup_logger
 from bot.utils.sentry import init_sentry
+
 # 🚨 IMPORT ROUTERS & TOKENS
 from web.dashboard import router as dashboard_router
 from web.dashboard import ACTIVE_TOKENS
+
 load_dotenv()
 logger = setup_logger("MasterServer")
 limiter = Limiter(key_func=get_remote_address)
 
+
 async def start(update: Update, context):
     """Standard welcome command."""
-    # 🚨 User-Friendly warning if used in the group
     if update.message.chat.type != 'private':
         await update.message.reply_text("👋 Hi! I'm Trip OS. Please send me a private message to see my setup guide.", parse_mode='HTML')
         return
@@ -53,9 +55,9 @@ async def start(update: Update, context):
         parse_mode='HTML'
     )
 
+
 async def help_command(update: Update, context):
     """Shows the help manual."""
-    # 🚨 User-Friendly warning if used in the group
     if update.message.chat.type != 'private':
         await update.message.reply_text("⚠️ To keep the group chat clean, I only send the manual in private messages. Please DM me /help!", parse_mode='HTML')
         return
@@ -79,6 +81,7 @@ async def help_command(update: Update, context):
         parse_mode='HTML'
     )
 
+
 async def get_dashboard_link(update: Update, context):
     """Generates a secure UUID dashboard link and sends it PRIVATELY to the admin."""
     chat_id = update.message.chat_id
@@ -96,39 +99,36 @@ async def get_dashboard_link(update: Update, context):
     except Exception:
         await update.message.reply_text("⚠️ Make me an Admin so I can verify your permissions!")
         return
-    
+
     if len(ACTIVE_TOKENS) > 50:
         ACTIVE_TOKENS.pop(next(iter(ACTIVE_TOKENS)))
 
-    # 🔐 Generate a secure, unguessable token and store it in memory
     sec_token = str(uuid.uuid4())
     ACTIVE_TOKENS[sec_token] = chat_id
 
-    # Create the secure link
     dashboard_url = f"https://yatra-bot.onrender.com/?token={sec_token}"
-    
+
     try:
-        # 🚨 MUST SEND TO PRIVATE DM (Master Spec Rule)
         await context.bot.send_message(
             chat_id=user_id,
             text=f"📊 <b>Your Trip Dashboard</b>\n\n📍 Group: {update.message.chat.title}\n\n🔐 <b>Secure Admin Link:</b>\n{dashboard_url}\n\n<i>Note: For security, this link will expire if the server restarts.</i>",
             parse_mode='HTML',
             disable_web_page_preview=True
         )
-        # Notify the group silently
         await update.message.reply_text("✅ Secure dashboard link sent to your private messages.")
     except Exception as e:
         logger.error(f"Failed to DM dashboard link: {e}")
         await update.message.reply_text("⚠️ I couldn't DM you. Please send me a private message first (/start) so I can send you the secure link!")
 
+
 async def global_error_handler(update: object, context):
     """Log the error and send a polite message to the user."""
     error_msg = str(context.error)
-    
+
     if "Query is too old" in error_msg or "query id is invalid" in error_msg:
         logger.warning(f"Callback expired: {error_msg}")
         return
-    # Send message to the user if possible
+
     logger.error(f"Exception while handling an update: {context.error}")
     if isinstance(update, Update) and update.effective_message:
         await update.effective_message.reply_text(
@@ -136,24 +136,28 @@ async def global_error_handler(update: object, context):
             parse_mode='HTML'
         )
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🗄️ Initializing Database...")
     await init_db()
-    
+
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # https://yatra-bot.onrender.com/webhook
+
     if not TOKEN:
         logger.critical("❌ No TELEGRAM_BOT_TOKEN found. Bot will not start.")
+    elif not WEBHOOK_URL:
+        logger.critical("❌ No WEBHOOK_URL found. Bot will not start.")
     else:
         try:
-            logger.info("🤖 Starting Telegram Bot Polling...")
+            logger.info("🤖 Setting up Telegram Bot via Webhook...")
             bot_app = Application.builder().token(TOKEN).build()
-            
-            # 🛑 PERSONAL CHAT COMMANDS (Filters removed so they can reply gracefully in groups)
+
+            # 🛑 PERSONAL CHAT COMMANDS
             bot_app.add_handler(CommandHandler("start", start))
             bot_app.add_handler(CommandHandler("help", help_command))
-            
+
             # 🌍 GROUP CHAT COMMANDS
             bot_app.add_handler(CommandHandler("plan_trip", plan_trip, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("whereis", where_is_everyone, filters=filters.ChatType.GROUPS))
@@ -173,40 +177,59 @@ async def lifespan(app: FastAPI):
             bot_app.add_handler(CommandHandler("vault", open_vault))
             bot_app.add_handler(MessageHandler(filters.LOCATION, track_location))
             bot_app.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO, save_to_vault))
-            
+
             # 🔘 BUTTON CALLBACKS
             bot_app.add_handler(CallbackQueryHandler(handle_expense_callback, pattern="^exp_"))
             bot_app.add_handler(CallbackQueryHandler(handle_packing_callback, pattern="^pack_"))
             bot_app.add_handler(CallbackQueryHandler(handle_sos_callback, pattern="^sos_"))
             bot_app.add_handler(CallbackQueryHandler(get_vault_file, pattern="^getv_"))
             bot_app.add_error_handler(global_error_handler)
+
             await bot_app.initialize()
-            start_scheduler(bot_app)
-            
             await bot_app.start()
-            await bot_app.bot.delete_webhook(drop_pending_updates=True)
-            await bot_app.updater.start_polling(drop_pending_updates=True)
-            app.state.bot_app = bot_app 
-            logger.info("✅ Bot is live and listening for messages.")
+            start_scheduler(bot_app)
+
+            # ✅ WEBHOOK MODE — no polling conflict on redeploy
+            await bot_app.bot.set_webhook(
+                url=WEBHOOK_URL,
+                drop_pending_updates=True
+            )
+            app.state.bot_app = bot_app
+            logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+
         except Exception as e:
             logger.error(f"❌ Bot failed to start: {e}")
 
     yield
 
+    # 🛑 CLEAN SHUTDOWN
     if TOKEN and hasattr(app.state, 'bot_app'):
         logger.info("🛑 Shutting down Bot...")
-        await app.state.bot_app.updater.stop()
+        await app.state.bot_app.bot.delete_webhook()
         await app.state.bot_app.stop()
         await app.state.bot_app.shutdown()
+
 
 init_sentry()
 app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "bot_running": hasattr(app.state, 'bot_app')}
+
+
+# ✅ WEBHOOK ENDPOINT — Telegram posts updates here
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, app.state.bot_app.bot)
+    await app.state.bot_app.process_update(update)
+    return {"ok": True}
+
 
 # 🚨 PLUG IN THE DASHBOARD ROUTER HERE
 app.include_router(dashboard_router)
