@@ -1,12 +1,13 @@
 import csv
 import io
+import traceback
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from bot.database.db_config import AsyncSessionLocal, Expense, User, TripGroup
+from bot.database.db_config import AsyncSessionLocal, Expense, User, TripGroup, GroupMember
 from bot.utils.logger import setup_logger
-
+from datetime import timedelta
 logger = setup_logger("ExpenseHandler")
 
 async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -35,6 +36,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.begin():
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=update.message.chat.title).on_conflict_do_nothing(index_elements=['chat_id']))
+                
+                # Automatically register the payer as a group member so they appear in /balance
+                await session.execute(pg_insert(GroupMember).values(chat_id=chat_id, user_id=user.id).on_conflict_do_nothing(index_elements=['chat_id', 'user_id']))
                 
                 expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
                 session.add(expense)
@@ -109,6 +113,20 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
 
 async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
+    user_id = update.message.from_user.id
+    
+    # 🔐 ADMIN SECURITY LOCK
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        admin_ids = [admin.user.id for admin in admins]
+        if user_id not in admin_ids:
+            await update.message.reply_text("⚠️ Only group Admins can change the total member count!")
+            return
+    except Exception as e:
+        logger.error(f"Failed to fetch admins: {e}")
+        await update.message.reply_text("⚠️ Make me an Admin first so I can verify your permissions.")
+        return
+
     try:
         count = int(context.args[0])
         async with AsyncSessionLocal() as session:
@@ -118,30 +136,47 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.message.reply_text("⚠️ Usage: /set_members [number]")
 
+
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     try:
         async with AsyncSessionLocal() as session:
+            # 1. Group info
             group = await session.get(TripGroup, chat_id)
             total_members = group.member_count if group and group.member_count and group.member_count > 0 else 1
 
-            expenses = (await session.execute(
-                select(Expense, User.name)
+            # 2. Fetch all verified expenses using safe tuple mapping
+            expenses_result = await session.execute(
+                select(Expense.amount, User.name)
                 .join(User, Expense.payer_id == User.telegram_id)
                 .where(Expense.chat_id == chat_id, Expense.is_verified == True)
-            )).all()
+            )
+            expenses = expenses_result.all()
+
+            # 3. Fetch all known group members who have registered in the DB
+            members_result = await session.execute(
+                select(User.name)
+                .join(GroupMember, User.telegram_id == GroupMember.user_id)
+                .where(GroupMember.chat_id == chat_id)
+            )
+            known_members = members_result.scalars().all()
 
         if not expenses:
             await update.message.reply_text("📊 No verified expenses yet.")
             return
 
-        total_spent = sum([row.Expense.amount for row in expenses])
+        # 4. Build the user dictionary (Initialize everyone known with 0)
+        user_totals = {name: 0 for name in known_members}
+        
+        # 5. Add actual paid amounts (and catch anyone who paid but wasn't synced)
+        for amount, name in expenses:
+            user_totals[name] = user_totals.get(name, 0) + float(amount)
+
+        # Calculate math
+        total_spent = sum(user_totals.values())
         per_person = total_spent / total_members
 
-        user_totals = {}
-        for row in expenses:
-            user_totals[row.name] = user_totals.get(row.name, 0) + row.Expense.amount
-
+        # 6. Generate UI
         msg = f"📊 <b>Trip Expenses</b>\n➖➖➖➖➖➖➖➖➖➖\n"
         msg += f"👥 Splitting between: <b>{total_members} people</b>\n"
         msg += f"💰 Total Spent: ₹{total_spent:,.2f}\n"
@@ -150,12 +185,16 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for name, paid in user_totals.items():
             diff = paid - per_person
             status = f"🟢 Gets back ₹{diff:,.2f}" if diff >= 0 else f"🔴 Owes ₹{abs(diff):,.2f}"
-            msg += f"👤 <b>{name}</b> (Paid: ₹{paid:,.2f})\n   {status}\n\n"
+            msg += f"👤 <b>{name}</b> (Paid: ₹{paid:,.0f})\n   {status}\n\n"
+
+        # 7. Add Smart Warning if unregistered users are missing from the list
+        if len(user_totals) < total_members:
+            msg += f"\n<i>⚠️ Note: You set {total_members} members, but only {len(user_totals)} are registered. Unregistered friends won't appear by name until they interact with me!</i>"
 
         await update.message.reply_text(msg, parse_mode='HTML')
     except Exception as e:
-        logger.error(f"Balance error: {e}")
-        await update.message.reply_text("⚠️ Error calculating balances.")
+        logger.error(f"Balance error: {e}\n{traceback.format_exc()}")
+        await update.message.reply_text("⚠️ Error calculating balances. Check the server logs.")
 
 async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type == 'private': return
@@ -185,7 +224,11 @@ async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     writer.writerow(["Date", "Payer", "Amount (INR)", "Description"])
     
     for row in expenses:
-        dt = row.Expense.created_at.strftime("%Y-%m-%d %H:%M") if row.Expense.created_at else "N/A"
+        if row.Expense.created_at:
+            ist_time = row.Expense.created_at + timedelta(hours=5, minutes=30)
+            dt = ist_time.strftime("%Y-%m-%d %I:%M %p")
+        else:
+            dt = "N/A"
         writer.writerow([dt, row.name, row.Expense.amount, row.Expense.description])
 
     output.seek(0)

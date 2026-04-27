@@ -86,7 +86,7 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for loc, user_name in locations:
             time_str = format_ist(loc.updated_at)
             # 🚨 FIX: Official Universal Maps URL (1/ prefix ensures correct pin drop)
-            maps_url = f"http://maps.google.com/maps?q={loc.latitude},{loc.longitude}"
+            maps_url = f"https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
             msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='{maps_url}'>Open on Maps</a>\n\n"
 
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
@@ -117,12 +117,25 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Searching for <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
-        headers = {"User-Agent": f"YatraBot_{chat_id}"}
+        # 🚨 FIX 1: Provide a standard User-Agent so the map server doesn't block the bot
+        headers = {"User-Agent": "TripOS_Bot/1.0 (https://t.me/TripOS)"}
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
         
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
-            data = resp.json()
+            
+            # 🚨 FIX 2: Check if the server actually gave us an OK response before parsing JSON
+            if resp.status_code != 200:
+                logger.error(f"Nominatim API Error: Status {resp.status_code}")
+                await status_msg.edit_text("❌ The map server is currently busy. Please try again in a few minutes.")
+                return
+                
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.error("Nominatim returned non-JSON data.")
+                await status_msg.edit_text("❌ The map server returned invalid data. Please try again.")
+                return
 
         if not data:
             await status_msg.edit_text(f"❌ Could not find '{search_query}'. Try a more general name.")
@@ -142,14 +155,14 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 await session.execute(stmt)
 
-        maps_url = f"http://maps.google.com/maps?q={lat},{lon}"
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
         await status_msg.edit_text(
             f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='{maps_url}'>View on Maps</a>",
             parse_mode='HTML', disable_web_page_preview=True
         )
     except Exception as e:
         logger.error(f"plan_trip search error: {e}")
-        await status_msg.edit_text("⚠️ Search timed out. Please try again.")
+        await status_msg.edit_text("⚠️ Search timed out or failed. Please try again.")
 
 async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches destination weather with Drone safety check."""

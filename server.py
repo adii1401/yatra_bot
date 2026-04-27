@@ -1,10 +1,12 @@
 ﻿import os
+import uuid
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -25,11 +27,12 @@ from bot.handlers.itinerary import (
     packing_list, handle_packing_callback, add_packing_item
 )
 from bot.handlers.vault import save_to_vault, open_vault, get_vault_file
+from bot.handlers.scheduler import start_scheduler
 from bot.utils.logger import setup_logger
-
-# 🚨 IMPORT YOUR NEW ROUTER HERE
+from bot.utils.sentry import init_sentry
+# 🚨 IMPORT ROUTERS & TOKENS
 from web.dashboard import router as dashboard_router
-
+from web.dashboard import ACTIVE_TOKENS
 load_dotenv()
 logger = setup_logger("MasterServer")
 limiter = Limiter(key_func=get_remote_address)
@@ -77,7 +80,7 @@ async def help_command(update: Update, context):
     )
 
 async def get_dashboard_link(update: Update, context):
-    """Generates the dashboard link and posts it in the group."""
+    """Generates a secure UUID dashboard link and sends it PRIVATELY to the admin."""
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
 
@@ -93,14 +96,41 @@ async def get_dashboard_link(update: Update, context):
     except Exception:
         await update.message.reply_text("⚠️ Make me an Admin so I can verify your permissions!")
         return
+    
+    if len(ACTIVE_TOKENS) > 50:
+        ACTIVE_TOKENS.pop(next(iter(ACTIVE_TOKENS)))
 
-    # 🚨 Now posts directly to the group chat instead of DMs
-    dashboard_url = f"https://yatra-bot.onrender.com/?chat_id={chat_id}"
-    await update.message.reply_text(
-        f"📊 <b>Your Trip Dashboard</b>\n\nHere is the admin link for this group:\n{dashboard_url}",
-        parse_mode='HTML',
-        disable_web_page_preview=True
-    )
+    # 🔐 Generate a secure, unguessable token and store it in memory
+    sec_token = str(uuid.uuid4())
+    ACTIVE_TOKENS[sec_token] = chat_id
+
+    # Create the secure link
+    dashboard_url = f"https://yatra-bot.onrender.com/?token={sec_token}"
+    
+    try:
+        # 🚨 MUST SEND TO PRIVATE DM (Master Spec Rule)
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"📊 <b>Your Trip Dashboard</b>\n\n📍 Group: {update.message.chat.title}\n\n🔐 <b>Secure Admin Link:</b>\n{dashboard_url}\n\n<i>Note: For security, this link will expire if the server restarts.</i>",
+            parse_mode='HTML',
+            disable_web_page_preview=True
+        )
+        # Notify the group silently
+        await update.message.reply_text("✅ Secure dashboard link sent to your private messages.")
+    except Exception as e:
+        logger.error(f"Failed to DM dashboard link: {e}")
+        await update.message.reply_text("⚠️ I couldn't DM you. Please send me a private message first (/start) so I can send you the secure link!")
+
+async def global_error_handler(update: object, context):
+    """Log the error and send a polite message to the user."""
+    logger.error(f"Exception while handling an update: {context.error}")
+    
+    # Send message to the user if possible
+    if isinstance(update, Update) and update.effective_message:
+        await update.effective_message.reply_text(
+            "⚠️ <b>System Glitch!</b>\nMy circuits got a little tangled. The developers have been notified!",
+            parse_mode='HTML'
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -131,7 +161,9 @@ async def lifespan(app: FastAPI):
             bot_app.add_handler(CommandHandler("add_item", add_packing_item, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("explore", explore_nearby, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("add_landmark", add_landmark, filters=filters.ChatType.GROUPS))
+            bot_app.add_handler(CommandHandler("set_members", set_members, filters=filters.ChatType.GROUPS))
             bot_app.add_handler(CommandHandler("dashboard", get_dashboard_link, filters=filters.ChatType.GROUPS))
+            bot_app.add_handler(CommandHandler("export", export_expenses, filters=filters.ChatType.GROUPS))
 
             # 🗄️ HYBRID/UTILITY COMMANDS
             bot_app.add_handler(CommandHandler("vault", open_vault))
@@ -143,11 +175,12 @@ async def lifespan(app: FastAPI):
             bot_app.add_handler(CallbackQueryHandler(handle_packing_callback, pattern="^pack_"))
             bot_app.add_handler(CallbackQueryHandler(handle_sos_callback, pattern="^sos_"))
             bot_app.add_handler(CallbackQueryHandler(get_vault_file, pattern="^getv_"))
-            
+            bot_app.add_error_handler(global_error_handler)
             await bot_app.initialize()
+            start_scheduler(bot_app)
+            
             await bot_app.start()
             await bot_app.updater.start_polling(drop_pending_updates=True)
-            app.state.bot_app = bot_app
             logger.info("✅ Bot is live and listening for messages.")
         except Exception as e:
             logger.error(f"❌ Bot failed to start: {e}")
@@ -160,10 +193,11 @@ async def lifespan(app: FastAPI):
         await app.state.bot_app.stop()
         await app.state.bot_app.shutdown()
 
+init_sentry()
 app = FastAPI(lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
+app.add_middleware(SlowAPIMiddleware)
 @app.get("/health")
 async def health():
     return {"status": "healthy", "bot_running": hasattr(app.state, 'bot_app')}

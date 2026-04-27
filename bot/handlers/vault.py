@@ -18,6 +18,8 @@ async def save_to_vault(update: Update, context: ContextTypes.DEFAULT_TYPE):
     silent = False
     if update.message.media_group_id:
         group_id = update.message.media_group_id
+        if len(context.bot_data) > 200:
+            context.bot_data.clear()
         if context.bot_data.get(f"mg_{group_id}"):
             silent = True 
         else:

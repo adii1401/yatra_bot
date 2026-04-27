@@ -5,7 +5,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from bot.database.db_config import AsyncSessionLocal, UserLocation, TripGroup, Landmark, TripPlan, TripDocument, User, PackingItem
 from bot.handlers.logistics import calculate_distance
 from bot.utils.logger import setup_logger
-
+from telegram.error import BadRequest
 logger = setup_logger("ItineraryHandler")
 
 async def add_packing_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -78,7 +78,13 @@ async def handle_packing_callback(update: Update, context: ContextTypes.DEFAULT_
             label += f" ({i.checked_by})"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"pack_{i.id}")])
 
-    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            pass # Industry Standard: Silently ignore double-clicks
+        else:
+            logger.error(f"Keyboard edit error: {e}")
 
 async def add_landmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.edited_message
@@ -149,7 +155,7 @@ async def sos_emergency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if loc:
         # Generate a standard universal maps link
-        maps_url = f"http://maps.google.com/maps?q={loc.latitude},{loc.longitude}"
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
         msg += f"📍 Last Known Location: <a href='{maps_url}'>Open on Maps</a>\n"
     else:
         msg += "⚠️ <i>No GPS coordinates found for this user.</i>\n"
