@@ -35,10 +35,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # ✅ FIX: DB work is fully committed BEFORE any Telegram API calls.
-        # This eliminates the Double Charge Bug caused by @db_retry retrying
-        # the whole function if Telegram lags on the confirmation message.
         async with get_safe_session() as session:
             async with session.begin():
+                # 1. Ensure User exists
                 await session.execute(
                     pg_insert(User)
                     .values(telegram_id=user.id, name=user.full_name, username=user.username)
@@ -46,27 +45,28 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         index_elements=['telegram_id'],set_={'name': user.full_name, 'username': user.username}
                     )
                 )
-                await session.execute(
-                    pg_insert(Expense).values(
-                        chat_id=chat_id, payer_id=user.id, 
-                        amount=amount, description=description
-                    )
-                )
+                
+                # 2. Ensure TripGroup exists BEFORE adding an expense
                 await session.execute(
                     pg_insert(TripGroup)
                     .values(chat_id=chat_id, trip_name=update.message.chat.title)
                     .on_conflict_do_nothing(index_elements=['chat_id'])
                 )
+                
+                # 3. Ensure GroupMember exists
                 await session.execute(
                     pg_insert(GroupMember)
                     .values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
                 )
-
+                
+                # ✅ 4. CORRECT WAY TO INSERT EXPENSE ONCE
+                # We use only session.add() so it creates exactly 1 row and gives us the ID.
                 expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
                 session.add(expense)
                 await session.flush()
                 expense_id = expense.id
+                
         # ✅ DB transaction is committed here. Telegram calls below are safe to retry independently.
 
         keyboard = [[
@@ -100,7 +100,6 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Expense save error: {e}\n{traceback.format_exc()}")
         await update.message.reply_text("⚠️ Failed to save expense. Please try again.")
-
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query

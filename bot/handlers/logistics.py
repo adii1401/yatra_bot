@@ -44,6 +44,11 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     .on_conflict_do_nothing(index_elements=['telegram_id'])
                 )
                 await session.execute(
+                    pg_insert(TripGroup)
+                    .values(chat_id=chat_id, trip_name=msg.chat.title)
+                    .on_conflict_do_nothing(index_elements=['chat_id'])
+                )
+                await session.execute(
                     pg_insert(GroupMember)
                     .values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])

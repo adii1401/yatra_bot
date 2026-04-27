@@ -21,6 +21,11 @@ async def add_packing_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_safe_session() as session:
             async with session.begin():
+                await session.execute(
+                    pg_insert(TripGroup)
+                    .values(chat_id=chat_id, trip_name=update.message.chat.title)
+                    .on_conflict_do_nothing(index_elements=['chat_id'])
+                )
                 new_item = PackingItem(chat_id=chat_id, item_name=item_name)
                 session.add(new_item)
         await update.message.reply_text(f"✅ Added <b>{item_name}</b> to the squad packing list.\nUse /packing to check off items.", parse_mode='HTML')
@@ -119,6 +124,11 @@ async def add_landmark(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         async with get_safe_session() as session:
             async with session.begin():
+                await session.execute(
+                    pg_insert(TripGroup)
+                    .values(chat_id=chat_id, trip_name=msg.chat.title)
+                    .on_conflict_do_nothing(index_elements=['chat_id'])
+                )
                 session.add(Landmark(chat_id=chat_id, name=name, latitude=lat, longitude=lon))
         await msg.reply_text(f"✅ Landmark saved: <b>{name}</b>", parse_mode='HTML')
     except Exception as e:
