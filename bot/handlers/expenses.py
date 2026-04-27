@@ -148,8 +148,19 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Make me an Admin first so I can verify your permissions.")
         return
 
+    # ✅ 1. SYNTAX CHECK: Separate from the database so it catches bracket typos
+    if not context.args:
+        await update.message.reply_text("⚠️ Usage: /set_members 4\n(Type the number directly with a space, no brackets!)")
+        return
+        
     try:
         count = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("⚠️ Please just provide a number. Example: /set_members 4")
+        return
+
+    # ✅ 2. DATABASE SAVING: If this fails, it reports a DB error, not a usage error
+    try:
         async with get_safe_session() as session:
             async with session.begin():
                 await session.execute(
@@ -158,9 +169,9 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     .on_conflict_do_update(index_elements=['chat_id'], set_={'member_count': count})
                 )
         await update.message.reply_text(f"✅ Total group members set to {count} for splitting.")
-    except Exception:
-        await update.message.reply_text("⚠️ Usage: /set_members [number]")
-
+    except Exception as e:
+        logger.error(f"Database error in set_members: {e}")
+        await update.message.reply_text("⚠️ Database is waking up or had an error. Please type the command again.")
 
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id

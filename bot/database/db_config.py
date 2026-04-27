@@ -22,7 +22,7 @@ engine = create_async_engine(
     connect_args={
         "prepared_statement_cache_size": 0,  # Fixes DuplicatePreparedStatementError on PgBouncer
         "statement_cache_size": 0,           # Disables caching that conflicts with transaction pooling
-        "timeout": 10,                       # ✅ FIX 1: Fail fast instead of hanging on paused DB
+        "timeout": 20,                       # ✅ FIX 1: Fail fast instead of hanging on paused DB
         "command_timeout": 30,               # ✅ FIX 1: Per-query timeout to avoid silent hangs
     } if not DATABASE_URL.startswith("sqlite") else {}  # sqlite doesn't support these args
 )
@@ -143,7 +143,7 @@ async def get_safe_session():
     (via SELECT 1) before handing the session to the caller.
     """
     # 1. RETRY LOOP — runs entirely before yield
-    for attempt in range(3):
+    for attempt in range(5):
         session = AsyncSessionLocal()
         try:
             # Force SQLAlchemy to open the real TCP connection NOW.
