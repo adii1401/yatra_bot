@@ -1,8 +1,8 @@
-"""init full schema with packing list
+"""initial_schema
 
-Revision ID: 9a9301b41dad
+Revision ID: 22c58572e704
 Revises: 
-Create Date: 2026-04-26 17:59:23.894430
+Create Date: 2026-04-27 10:52:12.963923
 
 """
 from typing import Sequence, Union
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision: str = '9a9301b41dad'
+revision: str = '22c58572e704'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -25,6 +25,8 @@ def upgrade() -> None:
     sa.Column('chat_id', sa.BigInteger(), nullable=False),
     sa.Column('trip_name', sa.String(), nullable=True),
     sa.Column('destination_name', sa.String(), nullable=True),
+    sa.Column('dest_lat', sa.Float(), nullable=True),
+    sa.Column('dest_lon', sa.Float(), nullable=True),
     sa.Column('member_count', sa.Integer(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=True),
     sa.PrimaryKeyConstraint('chat_id')
@@ -58,7 +60,8 @@ def upgrade() -> None:
     sa.Column('joined_at', sa.DateTime(timezone=True), server_default=sa.text('(CURRENT_TIMESTAMP)'), nullable=True),
     sa.ForeignKeyConstraint(['chat_id'], ['trip_groups.chat_id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['users.telegram_id'], ),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    sa.UniqueConstraint('chat_id', 'user_id', name='_chat_user_uc')
     )
     op.create_index(op.f('ix_group_members_id'), 'group_members', ['id'], unique=False)
     op.create_table('landmarks',

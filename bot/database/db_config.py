@@ -136,22 +136,33 @@ db_logger = setup_logger("DatabaseManager")
 
 @asynccontextmanager
 async def get_safe_session():
-    """Provides a DB session that automatically survives Supabase cold starts."""
-    session = AsyncSessionLocal()
-    try:
-        # 🚨 This SELECT 1 acts as an alarm clock. If DB is asleep, it times out safely here.
-        await session.execute(text("SELECT 1"))
-    except Exception as e:
-        is_timeout = isinstance(e, (TimeoutError, asyncio.CancelledError)) or "timeout" in str(e).lower()
-        if is_timeout:
-            db_logger.warning("Supabase cold start detected. Waking up...")
-            await session.close()
-            await asyncio.sleep(1)  # Let the DB finish waking up
-            session = AsyncSessionLocal()  # Open a fresh, awake connection
-        else:
-            await session.close()
-            raise
+    """Provides a DB session that automatically survives Supabase cold starts.
 
+    Correct structure: the retry loop runs BEFORE yield.
+    Since you can only yield once, we must confirm the DB is awake
+    (via SELECT 1) before handing the session to the caller.
+    """
+    # 1. RETRY LOOP — runs entirely before yield
+    for attempt in range(3):
+        session = AsyncSessionLocal()
+        try:
+            # Force SQLAlchemy to open the real TCP connection NOW.
+            # With NullPool, the connection only opens on the first query —
+            # so this SELECT 1 is what actually triggers the cold-start timeout.
+            await session.execute(text("SELECT 1"))
+            break  # DB is awake — exit retry loop and proceed to yield
+
+        except Exception as e:
+            await session.close()
+            is_conn_err = "timeout" in str(e).lower() or isinstance(e, (TimeoutError, asyncio.CancelledError))
+            if attempt < 2 and is_conn_err:
+                db_logger.warning(f"Supabase waking up (attempt {attempt + 1}/3)... retrying in 2s")
+                await asyncio.sleep(2)
+                continue
+            db_logger.error(f"DB connection failed after {attempt + 1} attempts: {e}")
+            raise  # Out of retries or non-connection error — bubble up
+
+    # 2. YIELD EXACTLY ONCE — only reached if the loop above succeeded
     try:
         yield session
     finally:
