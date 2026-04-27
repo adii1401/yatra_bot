@@ -135,7 +135,13 @@ async def global_error_handler(update: object, context):
             "⚠️ <b>System Glitch!</b>\nMy circuits got a little tangled. The developers have been notified!",
             parse_mode='HTML'
         )
-
+async def unknown_command(update: Update, context):
+    """Catches unrecognized commands and guides the user."""
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "⚠️ <b>Unrecognized command!</b>\nType /help to see the expedition manual.", 
+            parse_mode='HTML'
+        )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -183,6 +189,7 @@ async def lifespan(app: FastAPI):
             bot_app.add_handler(CallbackQueryHandler(handle_packing_callback, pattern="^pack_"))
             bot_app.add_handler(CallbackQueryHandler(handle_sos_callback, pattern="^sos_"))
             bot_app.add_handler(CallbackQueryHandler(get_vault_file, pattern="^getv_"))
+            bot_app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
             bot_app.add_error_handler(global_error_handler)
 
             await bot_app.initialize()

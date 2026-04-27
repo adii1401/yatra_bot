@@ -61,6 +61,7 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         set_={'latitude': lat, 'longitude': lon, 'updated_at': func.now()}
                     )
                 )
+        await update.message.reply_text(f"📍 <b>Location Locked, {user.first_name}!</b>\nYou are now on the squad map.", parse_mode='HTML')
     except Exception as e:
         logger.error(f"track_location error: {e}")
 
