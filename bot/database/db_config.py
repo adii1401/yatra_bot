@@ -124,3 +124,35 @@ async def init_db():
     else:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))  # Wakes Supabase on startup
+
+
+# ================= SAFE SESSION CONTEXT MANAGER =================
+
+import asyncio
+from contextlib import asynccontextmanager
+from bot.utils.logger import setup_logger
+
+db_logger = setup_logger("DatabaseManager")
+
+@asynccontextmanager
+async def get_safe_session():
+    """Provides a DB session that automatically survives Supabase cold starts."""
+    session = AsyncSessionLocal()
+    try:
+        # 🚨 This SELECT 1 acts as an alarm clock. If DB is asleep, it times out safely here.
+        await session.execute(text("SELECT 1"))
+    except Exception as e:
+        is_timeout = isinstance(e, (TimeoutError, asyncio.CancelledError)) or "timeout" in str(e).lower()
+        if is_timeout:
+            db_logger.warning("Supabase cold start detected. Waking up...")
+            await session.close()
+            await asyncio.sleep(1)  # Let the DB finish waking up
+            session = AsyncSessionLocal()  # Open a fresh, awake connection
+        else:
+            await session.close()
+            raise
+
+    try:
+        yield session
+    finally:
+        await session.close()

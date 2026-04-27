@@ -1,15 +1,17 @@
 import csv
 import io
+import asyncio
 import traceback
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from bot.database.db_config import AsyncSessionLocal, Expense, User, TripGroup, GroupMember
+from bot.database.db_config import get_safe_session, Expense, User, TripGroup, GroupMember
 from bot.utils.logger import setup_logger
 from datetime import timedelta
 
 logger = setup_logger("ExpenseHandler")
+
 
 async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.chat.type == 'private':
@@ -31,9 +33,11 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     user = update.message.from_user
 
-    # ✅ DB transaction is completely isolated — no Telegram API calls inside
     try:
-        async with AsyncSessionLocal() as session:
+        # ✅ FIX: DB work is fully committed BEFORE any Telegram API calls.
+        # This eliminates the Double Charge Bug caused by @db_retry retrying
+        # the whole function if Telegram lags on the confirmation message.
+        async with get_safe_session() as session:
             async with session.begin():
                 await session.execute(
                     pg_insert(User)
@@ -54,9 +58,9 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 expense = Expense(chat_id=chat_id, payer_id=user.id, amount=amount, description=description)
                 session.add(expense)
                 await session.flush()
-                expense_id = expense.id  # ✅ Capture ID before session closes
+                expense_id = expense.id
+        # ✅ DB transaction is committed here. Telegram calls below are safe to retry independently.
 
-        # ✅ DB committed. Now safe to call Telegram API.
         keyboard = [[
             InlineKeyboardButton("✅ Approve", callback_data=f"exp_yes_{expense_id}_{chat_id}"),
             InlineKeyboardButton("❌ Reject", callback_data=f"exp_no_{expense_id}_{chat_id}")
@@ -102,36 +106,31 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
     expense_id = int(data[2])
     chat_id = int(data[3])
 
-    # ✅ FIX 2: Retry once on timeout — handles Supabase free tier waking up mid-session
-    for attempt in range(2):
-        try:
-            async with AsyncSessionLocal() as session:
-                async with session.begin():
-                    expense = await session.get(Expense, expense_id)
-                    if not expense:
-                        await query.edit_message_text("⚠️ Expense not found.")
-                        return
+    try:
+        # ✅ get_safe_session() handles DB wake-up internally; no manual retry loop needed.
+        async with get_safe_session() as session:
+            async with session.begin():
+                expense = await session.get(Expense, expense_id)
+                if not expense:
+                    await query.edit_message_text("⚠️ Expense not found.")
+                    return
 
-                    if action == "yes":
-                        expense.is_verified = True
-                        payer = await session.get(User, expense.payer_id)
-                        payer_name = payer.name if payer else "Someone"
-                        amt_display = int(expense.amount) if expense.amount % 1 == 0 else expense.amount
-                        msg = f"✅ Approved ₹{amt_display} for {expense.description} by {payer_name}"
-                    else:
-                        msg = f"❌ Rejected ₹{expense.amount}"
-                        await session.delete(expense)
+                if action == "yes":
+                    expense.is_verified = True
+                    payer = await session.get(User, expense.payer_id)
+                    payer_name = payer.name if payer else "Someone"
+                    amt_display = int(expense.amount) if expense.amount % 1 == 0 else expense.amount
+                    msg = f"✅ Approved ₹{amt_display} for {expense.description} by {payer_name}"
+                else:
+                    msg = f"❌ Rejected ₹{expense.amount}"
+                    await session.delete(expense)
 
-            await query.edit_message_text(msg)
-            await context.bot.send_message(chat_id=chat_id, text=msg)
-            break  # ✅ Success — exit retry loop
+        await query.edit_message_text(msg)
+        await context.bot.send_message(chat_id=chat_id, text=msg)
 
-        except Exception as e:
-            if attempt == 0:
-                logger.warning(f"Callback DB timeout, retrying... {e}")
-                continue
-            logger.error(f"Callback Error after retry: {e}\n{traceback.format_exc()}")
-            await query.edit_message_text("⚠️ Database timeout. Please tap Approve again.")
+    except Exception as e:
+        logger.error(f"Callback Error: {e}\n{traceback.format_exc()}")
+        await query.edit_message_text("⚠️ Database timeout. Please tap Approve again.")
 
 
 async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,7 +150,7 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         count = int(context.args[0])
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             async with session.begin():
                 await session.execute(
                     pg_insert(TripGroup)
@@ -166,7 +165,7 @@ async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             group = await session.get(TripGroup, chat_id)
             total_members = group.member_count if group and group.member_count and group.member_count > 0 else 1
 
@@ -213,7 +212,7 @@ async def check_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Balance error: {e}\n{traceback.format_exc()}")
-        await update.message.reply_text("⚠️ Error calculating balances. Check the server logs.")
+        await update.message.reply_text("⚠️ Error calculating balances. Please try again in a moment.")
 
 
 async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -230,7 +229,7 @@ async def export_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    async with AsyncSessionLocal() as session:
+    async with get_safe_session() as session:
         expenses = (await session.execute(
             select(Expense, User.name)
             .join(User, Expense.payer_id == User.telegram_id)

@@ -5,12 +5,13 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy import select
-from bot.database.db_config import AsyncSessionLocal, UserLocation, TripGroup, GroupMember, User
+from bot.database.db_config import get_safe_session, UserLocation, TripGroup, GroupMember, User
 from bot.utils.logger import setup_logger
 from bot.utils.helpers import format_ist
 from datetime import datetime
 
 logger = setup_logger("LogisticsHandler")
+
 
 def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     """Haversine formula — returns distance in meters."""
@@ -21,11 +22,13 @@ def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+
 async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves user coordinates and ensures they are linked to the current group."""
     msg = update.message or update.edited_message
-    if not msg or not msg.location: return
-    
+    if not msg or not msg.location:
+        return
+
     if msg.chat.type == 'private':
         await msg.reply_text("⚠️ Please share your location inside the trip group!")
         return
@@ -33,14 +36,12 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, loc, chat_id = msg.from_user, msg.location, msg.chat_id
 
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             async with session.begin():
-                # 1. Register User & Group if not exists
                 await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
                 await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=msg.chat.title or "Trip Group").on_conflict_do_nothing(index_elements=['chat_id']))
                 await session.flush()
 
-                # 2. Update/Insert GPS coordinates
                 await session.execute(
                     pg_insert(UserLocation).values(
                         telegram_id=user.id, latitude=loc.latitude, longitude=loc.longitude, updated_at=datetime.utcnow()
@@ -50,25 +51,23 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
 
-                # 3. Explicitly link user to this specific trip group
                 await session.execute(
                     pg_insert(GroupMember).values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
                 )
 
-        # Confirm receipt to the user
         if update.message:
             await update.message.reply_text(f"📍 <b>{user.first_name}</b> checked in!", parse_mode='HTML')
-            
+
     except Exception as e:
         logger.error(f"track_location error: {e}")
+
 
 async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Lists all squad members who have shared location in this group."""
     chat_id = update.message.chat_id
     try:
-        async with AsyncSessionLocal() as session:
-            # JOIN logic: Find all users who are members of THIS chat_id and have location records
+        async with get_safe_session() as session:
             result = await session.execute(
                 select(UserLocation, User.name)
                 .join(User, UserLocation.telegram_id == User.telegram_id)
@@ -85,7 +84,6 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📍 <b>Squad Status</b>\n➖➖➖➖➖➖➖➖➖➖\n"
         for loc, user_name in locations:
             time_str = format_ist(loc.updated_at)
-            # 🚨 FIX: Official Universal Maps URL (1/ prefix ensures correct pin drop)
             maps_url = f"https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
             msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='{maps_url}'>Open on Maps</a>\n\n"
 
@@ -93,13 +91,14 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"whereis error: {e}")
 
+
 async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Sets trip destination using Nominatim OpenStreetMap search."""
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
-    
+
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             group = await session.get(TripGroup, chat_id)
             if group and group.destination_name:
                 admins = await context.bot.get_chat_administrators(chat_id)
@@ -117,19 +116,17 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text(f"🔍 Searching for <b>{search_query}</b>...", parse_mode='HTML')
 
     try:
-        # 🚨 FIX 1: Provide a standard User-Agent so the map server doesn't block the bot
         headers = {"User-Agent": "TripOS_Bot/1.0 (https://t.me/TripOS)"}
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
-        
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
-            
-            # 🚨 FIX 2: Check if the server actually gave us an OK response before parsing JSON
+
             if resp.status_code != 200:
                 logger.error(f"Nominatim API Error: Status {resp.status_code}")
                 await status_msg.edit_text("❌ The map server is currently busy. Please try again in a few minutes.")
                 return
-                
+
             try:
                 data = resp.json()
             except ValueError:
@@ -144,7 +141,7 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lat, lon = float(data[0]['lat']), float(data[0]['lon'])
         dest_name = data[0]['display_name'].split(",")[0]
 
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             async with session.begin():
                 stmt = pg_insert(TripGroup).values(
                     chat_id=chat_id, dest_lat=lat, dest_lon=lon,
@@ -164,11 +161,12 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"plan_trip search error: {e}")
         await status_msg.edit_text("⚠️ Search timed out or failed. Please try again.")
 
+
 async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches destination weather with Drone safety check."""
     chat_id = update.message.chat_id
     try:
-        async with AsyncSessionLocal() as session:
+        async with get_safe_session() as session:
             group = await session.get(TripGroup, chat_id)
 
         if not group or not group.dest_lat:
