@@ -22,7 +22,9 @@ def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
 LAST_LOCATION_PING={}
+
 async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves user coordinates and ensures they are linked to the current group."""
     msg = update.message or update.edited_message
@@ -34,8 +36,10 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id, user = msg.chat_id, msg.from_user
     lat, lon = msg.location.latitude, msg.location.longitude
+    
+    # 🛡️ THE SHIELD: Prevent DB overload (60-second debounce)
     current_time = time.time()
-    last_ping =LAST_LOCATION_PING.get(user.id,0)
+    last_ping = LAST_LOCATION_PING.get(user.id, 0)
 
     if current_time - last_ping < 60:
         return
@@ -43,7 +47,6 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         async with get_safe_session() as session:
-            # ✅ Transaction block for writes prevents connection state errors
             async with session.begin():
                 await session.execute(
                     pg_insert(User)
@@ -68,12 +71,38 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         set_={'latitude': lat, 'longitude': lon, 'updated_at': func.now()}
                     )
                 )
-        await update.message.reply_text(f"📍 <b>Location Locked, {user.first_name}!</b>\nYou are now on the squad map.", parse_mode='HTML')
+        
+        # ✅ FIX: Only reply to the INITIAL location drop to avoid spamming the chat
+        if update.message:
+            await msg.reply_text(
+                f"📍 <b>Location Locked, {user.first_name}!</b>\nYou are now on the squad map.", 
+                parse_mode='HTML'
+            )
+
     except Exception as e:
         logger.error(f"track_location error: {e}")
 
 async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sets the trip destination using Nominatim search."""
+    """Sets the trip destination using Nominatim search and provides a map link."""
+    # Ensure this is used in a group and by an admin
+    if update.message.chat.type == 'private':
+        await update.message.reply_text("⚠️ Please use this command inside your trip group.")
+        return
+
+    chat_id = update.message.chat_id
+    user_id = update.message.from_user.id
+
+    # 🚨 SECURITY: Verify Admin Role before proceeding
+    try:
+        admins = await context.bot.get_chat_administrators(chat_id)
+        if user_id not in [admin.user.id for admin in admins]:
+            await update.message.reply_text("⚠️ Only group Admins can set the destination!")
+            return
+    except Exception as e:
+        logger.error(f"Admin check failed in plan_trip: {e}")
+        await update.message.reply_text("⚠️ Make me an Admin so I can verify permissions!")
+        return
+
     if not context.args:
         await update.message.reply_text("⚠️ Usage: /plan_trip [destination name]")
         return
@@ -82,8 +111,8 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("🔍 Searching destination...")
 
     try:
-        # 🚨 FIX: Unique User-Agent to bypass OpenStreetMap cloud provider blocks
-        headers = {"User-Agent": "Yatra_Bot_Kedarnath_Expedition/2.0 (contact: @adi1401)"}
+        # 🚨 Nominatim API Search with unique User-Agent
+        headers = {"User-Agent": "Yatra_Bot (contact: @adi1401)"}
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
 
         async with httpx.AsyncClient(timeout=15) as client:
@@ -101,10 +130,9 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         name = data[0]['display_name'].split(",")[0]
         lat, lon = float(data[0]['lat']), float(data[0]['lon'])
-        chat_id = update.message.chat_id
 
+        # ✅ ARCHITECTURE: Safe Database Transaction
         async with get_safe_session() as session:
-            # ✅ Transaction block for destination update
             async with session.begin():
                 await session.execute(
                     pg_insert(TripGroup)
@@ -115,11 +143,20 @@ async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 )
 
-        await status_msg.edit_text(f"✅ Trip destination set to: <b>{name}</b>", parse_mode='HTML')
+        # ✅ NATIVE FORMAT: Google Maps link with coordinates
+        maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+        await status_msg.edit_text(
+            f"✅ Trip destination set to: <b>{name}</b>\n\n"
+            f"🗺️ <a href='{maps_url}'>View on Google Maps</a>",
+            parse_mode='HTML',
+            disable_web_page_preview=False 
+        )
 
     except Exception as e:
         logger.error(f"plan_trip error: {e}")
         await status_msg.edit_text("⚠️ Search timed out or failed. Please try again.")
+
 
 async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches destination weather with Drone safety check."""
