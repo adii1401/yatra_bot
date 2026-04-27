@@ -21,8 +21,10 @@ engine = create_async_engine(
     echo=False,
     connect_args={
         "prepared_statement_cache_size": 0,  # Fixes DuplicatePreparedStatementError on PgBouncer
-        "statement_cache_size": 0            # Disables caching that conflicts with transaction pooling
-    }
+        "statement_cache_size": 0,           # Disables caching that conflicts with transaction pooling
+        "timeout": 10,                       # ✅ FIX 1: Fail fast instead of hanging on paused DB
+        "command_timeout": 30,               # ✅ FIX 1: Per-query timeout to avoid silent hangs
+    } if not DATABASE_URL.startswith("sqlite") else {}  # sqlite doesn't support these args
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -94,7 +96,6 @@ class TripPlan(Base):
     plan_text = Column(String)
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
-# 👇 THESE WERE MISSING 👇
 class TripDocument(Base):
     __tablename__ = "trip_documents"
     id = Column(Integer, primary_key=True, index=True)
@@ -113,7 +114,6 @@ class Landmark(Base):
     latitude = Column(Float)
     longitude = Column(Float)
     notes = Column(String, nullable=True)
-# 👆 ======================= 👆
 
 # ================= DB INITIALIZATION =================
 
@@ -123,4 +123,4 @@ async def init_db():
             await conn.run_sync(Base.metadata.create_all)
     else:
         async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+            await conn.execute(text("SELECT 1"))  # Wakes Supabase on startup

@@ -31,7 +31,7 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat.id
     user = update.message.from_user
 
-    # ✅ FIX: DB transaction is completely isolated — no Telegram API calls inside
+    # ✅ DB transaction is completely isolated — no Telegram API calls inside
     try:
         async with AsyncSessionLocal() as session:
             async with session.begin():
@@ -102,29 +102,36 @@ async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_
     expense_id = int(data[2])
     chat_id = int(data[3])
 
-    try:
-        async with AsyncSessionLocal() as session:
-            async with session.begin():
-                expense = await session.get(Expense, expense_id)
-                if not expense:
-                    await query.edit_message_text("⚠️ Expense not found.")
-                    return
+    # ✅ FIX 2: Retry once on timeout — handles Supabase free tier waking up mid-session
+    for attempt in range(2):
+        try:
+            async with AsyncSessionLocal() as session:
+                async with session.begin():
+                    expense = await session.get(Expense, expense_id)
+                    if not expense:
+                        await query.edit_message_text("⚠️ Expense not found.")
+                        return
 
-                if action == "yes":
-                    expense.is_verified = True
-                    payer = await session.get(User, expense.payer_id)
-                    payer_name = payer.name if payer else "Someone"
-                    amt_display = int(expense.amount) if expense.amount % 1 == 0 else expense.amount
-                    msg = f"✅ Approved ₹{amt_display} for {expense.description} by {payer_name}"
-                else:
-                    msg = f"❌ Rejected ₹{expense.amount}"
-                    await session.delete(expense)
+                    if action == "yes":
+                        expense.is_verified = True
+                        payer = await session.get(User, expense.payer_id)
+                        payer_name = payer.name if payer else "Someone"
+                        amt_display = int(expense.amount) if expense.amount % 1 == 0 else expense.amount
+                        msg = f"✅ Approved ₹{amt_display} for {expense.description} by {payer_name}"
+                    else:
+                        msg = f"❌ Rejected ₹{expense.amount}"
+                        await session.delete(expense)
 
-        await query.edit_message_text(msg)
-        await context.bot.send_message(chat_id=chat_id, text=msg)
+            await query.edit_message_text(msg)
+            await context.bot.send_message(chat_id=chat_id, text=msg)
+            break  # ✅ Success — exit retry loop
 
-    except Exception as e:
-        logger.error(f"Callback Error: {e}\n{traceback.format_exc()}")
+        except Exception as e:
+            if attempt == 0:
+                logger.warning(f"Callback DB timeout, retrying... {e}")
+                continue
+            logger.error(f"Callback Error after retry: {e}\n{traceback.format_exc()}")
+            await query.edit_message_text("⚠️ Database timeout. Please tap Approve again.")
 
 
 async def set_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
