@@ -42,7 +42,7 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await session.execute(
                     pg_insert(User)
                     .values(telegram_id=user.id, name=user.full_name, username=user.username)
-                    .on_conflict_do_nothing(
+                    .on_conflict_do_update(
                         index_elements=['telegram_id'],set_={'name': user.full_name, 'username': user.username}
                     )
                 )
