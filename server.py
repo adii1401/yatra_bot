@@ -207,11 +207,15 @@ async def lifespan(app: FastAPI):
     # the new instance and set the webhook BEFORE shutting down the old one.
     # The old instance calling delete_webhook() last was silently wiping the webhook
     # that the new instance just registered, making the bot go completely deaf.
+    # 🛑 CLEAN SHUTDOWN
     if TOKEN and hasattr(app.state, 'bot_app'):
         logger.info("🛑 Shutting down Bot...")
+        
+        # 🚨 DELETE THIS LINE:
+        # await app.state.bot_app.bot.delete_webhook() 
+        
         await app.state.bot_app.stop()
         await app.state.bot_app.shutdown()
-
 
 init_sentry()
 app = FastAPI(lifespan=lifespan)

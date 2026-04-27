@@ -42,7 +42,15 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await session.execute(
                     pg_insert(User)
                     .values(telegram_id=user.id, name=user.full_name, username=user.username)
-                    .on_conflict_do_nothing(index_elements=['telegram_id'])
+                    .on_conflict_do_nothing(
+                        index_elements=['telegram_id'],set_={'name': user.full_name, 'username': user.username}
+                    )
+                )
+                await session.execute(
+                    pg_insert(Expense).values(
+                        chat_id=chat_id, payer_id=user.id, 
+                        amount=amount, description=description
+                    )
                 )
                 await session.execute(
                     pg_insert(TripGroup)

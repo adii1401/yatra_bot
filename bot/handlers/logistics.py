@@ -1,17 +1,17 @@
 import math
 import os
 import httpx
+import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy import select
+from sqlalchemy import select, func
 from bot.database.db_config import get_safe_session, UserLocation, TripGroup, GroupMember, User
 from bot.utils.logger import setup_logger
 from bot.utils.helpers import format_ist
 from datetime import datetime
 
 logger = setup_logger("LogisticsHandler")
-
 
 def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     """Haversine formula — returns distance in meters."""
@@ -22,7 +22,6 @@ def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-
 async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves user coordinates and ensures they are linked to the current group."""
     msg = update.message or update.edited_message
@@ -30,137 +29,84 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if msg.chat.type == 'private':
-        await msg.reply_text("⚠️ Please share your location inside the trip group!")
         return
 
-    user, loc, chat_id = msg.from_user, msg.location, msg.chat_id
+    chat_id, user = msg.chat_id, msg.from_user
+    lat, lon = msg.location.latitude, msg.location.longitude
 
     try:
         async with get_safe_session() as session:
+            # ✅ Transaction block for writes prevents connection state errors
             async with session.begin():
-                await session.execute(pg_insert(User).values(telegram_id=user.id, name=user.full_name, username=user.username).on_conflict_do_nothing(index_elements=['telegram_id']))
-                await session.execute(pg_insert(TripGroup).values(chat_id=chat_id, trip_name=msg.chat.title or "Trip Group").on_conflict_do_nothing(index_elements=['chat_id']))
-                await session.flush()
-
                 await session.execute(
-                    pg_insert(UserLocation).values(
-                        telegram_id=user.id, latitude=loc.latitude, longitude=loc.longitude, updated_at=datetime.utcnow()
-                    ).on_conflict_do_update(
-                        index_elements=['telegram_id'],
-                        set_={'latitude': loc.latitude, 'longitude': loc.longitude, 'updated_at': datetime.utcnow()}
-                    )
+                    pg_insert(User)
+                    .values(telegram_id=user.id, name=user.full_name)
+                    .on_conflict_do_nothing(index_elements=['telegram_id'])
                 )
-
                 await session.execute(
-                    pg_insert(GroupMember).values(chat_id=chat_id, user_id=user.id)
+                    pg_insert(GroupMember)
+                    .values(chat_id=chat_id, user_id=user.id)
                     .on_conflict_do_nothing(index_elements=['chat_id', 'user_id'])
                 )
-
-        if update.message:
-            await update.message.reply_text(f"📍 <b>{user.first_name}</b> checked in!", parse_mode='HTML')
-
+                await session.execute(
+                    pg_insert(UserLocation)
+                    .values(telegram_id=user.id, latitude=lat, longitude=lon)
+                    .on_conflict_do_update(
+                        index_elements=['telegram_id'],
+                        set_={'latitude': lat, 'longitude': lon, 'updated_at': func.now()}
+                    )
+                )
     except Exception as e:
         logger.error(f"track_location error: {e}")
 
-
-async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all squad members who have shared location in this group."""
-    chat_id = update.message.chat_id
-    try:
-        async with get_safe_session() as session:
-            result = await session.execute(
-                select(UserLocation, User.name)
-                .join(User, UserLocation.telegram_id == User.telegram_id)
-                .join(GroupMember, UserLocation.telegram_id == GroupMember.user_id)
-                .where(GroupMember.chat_id == chat_id)
-                .order_by(UserLocation.updated_at.desc())
-            )
-            locations = result.all()
-
-        if not locations:
-            await update.message.reply_text("📍 No locations found for this squad yet. Make sure everyone has shared their 'Live Location' here!")
-            return
-
-        msg = "📍 <b>Squad Status</b>\n➖➖➖➖➖➖➖➖➖➖\n"
-        for loc, user_name in locations:
-            time_str = format_ist(loc.updated_at)
-            maps_url = f"https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
-            msg += f"👤 <b>{user_name}</b>\n🕒 Last seen: {time_str}\n📍 <a href='{maps_url}'>Open on Maps</a>\n\n"
-
-        await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
-    except Exception as e:
-        logger.error(f"whereis error: {e}")
-
-
 async def plan_trip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Sets trip destination using Nominatim OpenStreetMap search."""
-    chat_id = update.message.chat_id
-    user_id = update.message.from_user.id
-
-    try:
-        async with get_safe_session() as session:
-            group = await session.get(TripGroup, chat_id)
-            if group and group.destination_name:
-                admins = await context.bot.get_chat_administrators(chat_id)
-                if user_id not in [a.user.id for a in admins]:
-                    await update.message.reply_text(f"⚠️ A trip to <b>{group.destination_name}</b> is already locked. Admins only!", parse_mode='HTML')
-                    return
-    except Exception as e:
-        logger.error(f"plan_trip permission check error: {e}")
-
+    """Sets the trip destination using Nominatim search."""
     if not context.args:
-        await update.message.reply_text("⚠️ Usage: <code>/plan_trip Kedarnath</code>", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Usage: /plan_trip [destination name]")
         return
 
-    search_query = " ".join(context.args)
-    status_msg = await update.message.reply_text(f"🔍 Searching for <b>{search_query}</b>...", parse_mode='HTML')
+    search_query = "+".join(context.args)
+    status_msg = await update.message.reply_text("🔍 Searching destination...")
 
     try:
-        headers = {"User-Agent": "TripOS_Bot/1.0 (https://t.me/TripOS)"}
+        # 🚨 FIX: Unique User-Agent to bypass OpenStreetMap cloud provider blocks
+        headers = {"User-Agent": "Yatra_Bot_Kedarnath_Expedition/2.0 (contact: @adi1401)"}
         url = f"https://nominatim.openstreetmap.org/search?q={search_query}&format=json&limit=1"
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, headers=headers)
-
             if resp.status_code != 200:
-                logger.error(f"Nominatim API Error: Status {resp.status_code}")
-                await status_msg.edit_text("❌ The map server is currently busy. Please try again in a few minutes.")
+                logger.error(f"Nominatim Error {resp.status_code}: {resp.text}")
+                await status_msg.edit_text("⚠️ Map service is busy. Please try again in a minute.")
                 return
-
-            try:
-                data = resp.json()
-            except ValueError:
-                logger.error("Nominatim returned non-JSON data.")
-                await status_msg.edit_text("❌ The map server returned invalid data. Please try again.")
-                return
+            
+            data = resp.json()
 
         if not data:
-            await status_msg.edit_text(f"❌ Could not find '{search_query}'. Try a more general name.")
+            await status_msg.edit_text("📍 Destination not found. Try a broader name.")
             return
 
+        name = data[0]['display_name'].split(",")[0]
         lat, lon = float(data[0]['lat']), float(data[0]['lon'])
-        dest_name = data[0]['display_name'].split(",")[0]
+        chat_id = update.message.chat_id
 
         async with get_safe_session() as session:
+            # ✅ Transaction block for destination update
             async with session.begin():
-                stmt = pg_insert(TripGroup).values(
-                    chat_id=chat_id, dest_lat=lat, dest_lon=lon,
-                    destination_name=dest_name, trip_name=f"{dest_name} Trip"
-                ).on_conflict_do_update(
-                    index_elements=['chat_id'],
-                    set_={'dest_lat': lat, 'dest_lon': lon, 'destination_name': dest_name}
+                await session.execute(
+                    pg_insert(TripGroup)
+                    .values(chat_id=chat_id, destination_name=name, dest_lat=lat, dest_lon=lon)
+                    .on_conflict_do_update(
+                        index_elements=['chat_id'],
+                        set_={'destination_name': name, 'dest_lat': lat, 'dest_lon': lon}
+                    )
                 )
-                await session.execute(stmt)
 
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
-        await status_msg.edit_text(
-            f"✅ Destination locked: <b>{dest_name}</b>\n📍 <a href='{maps_url}'>View on Maps</a>",
-            parse_mode='HTML', disable_web_page_preview=True
-        )
+        await status_msg.edit_text(f"✅ Trip destination set to: <b>{name}</b>", parse_mode='HTML')
+
     except Exception as e:
-        logger.error(f"plan_trip search error: {e}")
+        logger.error(f"plan_trip error: {e}")
         await status_msg.edit_text("⚠️ Search timed out or failed. Please try again.")
-
 
 async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Fetches destination weather with Drone safety check."""
@@ -183,13 +129,57 @@ async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp = data['main']['temp']
         wind = data['wind']['speed']
         desc = data['weather'][0]['description'].capitalize()
+        
+        # Drone safety threshold logic
         drone = "✅ Flyable" if wind < 5 else ("⚠️ Marginal" if wind < 10 else "❌ Too windy")
 
         await update.message.reply_text(
             f"🌤️ <b>Weather: {group.destination_name}</b>\n➖➖➖➖➖➖➖➖➖➖\n"
-            f"🌡️ Temp: {temp}°C\n💨 Wind: {wind} m/s\n☁️ Conditions: {desc}\n🚁 Drone: {drone}",
+            f"🌡️ Temp: <b>{temp}°C</b>\n"
+            f"☁️ Sky: <b>{desc}</b>\n"
+            f"💨 Wind: <b>{wind} m/s</b>\n"
+            f"🚁 Drone: <b>{drone}</b>",
             parse_mode='HTML'
         )
     except Exception as e:
         logger.error(f"weather error: {e}")
-        await update.message.reply_text("⚠️ Could not fetch weather.")
+        await update.message.reply_text("⚠️ Failed to fetch weather. Check API key.")
+
+async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows distances between all group members and the destination."""
+    chat_id = update.message.chat_id
+    
+    try:
+        async with get_safe_session() as session:
+            group = await session.get(TripGroup, chat_id)
+            
+            results = await session.execute(
+                select(User.name, UserLocation.latitude, UserLocation.longitude, UserLocation.updated_at)
+                .join(UserLocation, User.telegram_id == UserLocation.telegram_id)
+                .join(GroupMember, User.telegram_id == GroupMember.user_id)
+                .where(GroupMember.chat_id == chat_id)
+            )
+            locations = results.all()
+
+        if not locations:
+            await update.message.reply_text("📍 No live locations found. Share your 'Live Location' in this group!")
+            return
+
+        msg = "🗺️ <b>Squad Live Locations</b>\n➖➖➖➖➖➖➖➖➖➖\n"
+        
+        for name, lat, lon, updated in locations:
+            time_str = format_ist(updated)
+            
+            if group and group.dest_lat:
+                dist = calculate_distance(lat, lon, group.dest_lat, group.dest_lon)
+                dist_str = f"{dist/1000:.1f}km to {group.destination_name}"
+            else:
+                dist_str = "Dest. not set"
+
+            msg += f"👤 <b>{name}</b>\n   📍 {dist_str}\n   🕒 {time_str}\n\n"
+
+        await update.message.reply_text(msg, parse_mode='HTML')
+        
+    except Exception as e:
+        logger.error(f"whereis error: {e}")
+        await update.message.reply_text("⚠️ Error fetching locations.")
