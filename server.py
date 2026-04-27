@@ -2,7 +2,7 @@
 import uuid
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, BackgroundTasks
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -203,19 +203,11 @@ async def lifespan(app: FastAPI):
     yield
 
     # 🛑 CLEAN SHUTDOWN
-    # ✅ FIX 1: Removed delete_webhook() — Render zero-downtime deployments spin up
-    # the new instance and set the webhook BEFORE shutting down the old one.
-    # The old instance calling delete_webhook() last was silently wiping the webhook
-    # that the new instance just registered, making the bot go completely deaf.
-    # 🛑 CLEAN SHUTDOWN
     if TOKEN and hasattr(app.state, 'bot_app'):
         logger.info("🛑 Shutting down Bot...")
-        
-        # 🚨 DELETE THIS LINE:
-        # await app.state.bot_app.bot.delete_webhook() 
-        
         await app.state.bot_app.stop()
         await app.state.bot_app.shutdown()
+
 
 init_sentry()
 app = FastAPI(lifespan=lifespan)
@@ -228,8 +220,6 @@ app.add_middleware(SlowAPIMiddleware)
 async def health():
     bot_running = hasattr(app.state, 'bot_app')
 
-    # ✅ FIX 2: Auto-heal webhook on every health ping (UptimeRobot keeps this alive)
-    # If Render ever drops the webhook, the next ping restores it automatically.
     if bot_running:
         WEBHOOK_URL = os.getenv("WEBHOOK_URL")
         try:
@@ -237,7 +227,7 @@ async def health():
             if webhook_info.url != WEBHOOK_URL:
                 await app.state.bot_app.bot.set_webhook(
                     url=WEBHOOK_URL,
-                    drop_pending_updates=False  # don't lose queued messages on heal
+                    drop_pending_updates=False
                 )
                 logger.info("♻️ Webhook auto-healed")
         except Exception as e:
@@ -246,16 +236,19 @@ async def health():
     return {"status": "healthy", "bot_running": bot_running}
 
 
-# ✅ FIX 3: Guard webhook endpoint — returns clean error if bot failed to init
-# instead of crashing with AttributeError and sending Telegram a 500
 @app.post("/webhook")
-async def telegram_webhook(request: Request):
+async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
     if not hasattr(app.state, 'bot_app'):
         logger.error("Webhook hit but bot_app not initialized!")
         return {"ok": False, "error": "Bot not running"}
+    
     data = await request.json()
     update = Update.de_json(data, app.state.bot_app.bot)
-    await app.state.bot_app.process_update(update)
+    
+    # ✅ FIX: Process the bot command in the background
+    background_tasks.add_task(app.state.bot_app.process_update, update)
+    
+    # ✅ FIX: Instantly tell Telegram "I got it!" so it never sends duplicates
     return {"ok": True}
 
 

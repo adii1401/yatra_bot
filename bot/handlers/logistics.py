@@ -146,13 +146,11 @@ async def get_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Failed to fetch weather. Check API key.")
 
 async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows distances between all group members and the destination."""
+    """Shows clickable map links for all group members."""
     chat_id = update.message.chat_id
     
     try:
         async with get_safe_session() as session:
-            group = await session.get(TripGroup, chat_id)
-            
             results = await session.execute(
                 select(User.name, UserLocation.latitude, UserLocation.longitude, UserLocation.updated_at)
                 .join(UserLocation, User.telegram_id == UserLocation.telegram_id)
@@ -170,15 +168,12 @@ async def where_is_everyone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for name, lat, lon, updated in locations:
             time_str = format_ist(updated)
             
-            if group and group.dest_lat:
-                dist = calculate_distance(lat, lon, group.dest_lat, group.dest_lon)
-                dist_str = f"{dist/1000:.1f}km to {group.destination_name}"
-            else:
-                dist_str = "Dest. not set"
+            # ✅ FIX: Generates a direct, clickable Google Maps pin!
+            maps_url = f"https://www.google.com/maps?q={lat},{lon}"
 
-            msg += f"👤 <b>{name}</b>\n   📍 {dist_str}\n   🕒 {time_str}\n\n"
+            msg += f"👤 <b>{name}</b>\n   📍 <a href='{maps_url}'>View on Map</a>\n   🕒 {time_str}\n\n"
 
-        await update.message.reply_text(msg, parse_mode='HTML')
+        await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
         
     except Exception as e:
         logger.error(f"whereis error: {e}")

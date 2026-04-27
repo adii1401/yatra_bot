@@ -169,7 +169,7 @@ async def sos_emergency(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = f"🚨 <b>SOS ALERT TRIGGERED</b> 🚨\n\n<b>{user.first_name}</b> has signaled an emergency!\n"
 
     if loc:
-        maps_url = f"https://www.google.com/maps/search/?api=1&query={loc.latitude},{loc.longitude}"
+        maps_url = f"https://www.google.com/maps?q={loc.latitude},{loc.longitude}"
         msg += f"📍 Last Known Location: <a href='{maps_url}'>Open on Maps</a>\n"
     else:
         msg += "⚠️ <i>No GPS coordinates found for this user.</i>\n"
