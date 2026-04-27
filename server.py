@@ -203,9 +203,12 @@ async def lifespan(app: FastAPI):
     yield
 
     # 🛑 CLEAN SHUTDOWN
+    # ✅ FIX 1: Removed delete_webhook() — Render zero-downtime deployments spin up
+    # the new instance and set the webhook BEFORE shutting down the old one.
+    # The old instance calling delete_webhook() last was silently wiping the webhook
+    # that the new instance just registered, making the bot go completely deaf.
     if TOKEN and hasattr(app.state, 'bot_app'):
         logger.info("🛑 Shutting down Bot...")
-        await app.state.bot_app.bot.delete_webhook()
         await app.state.bot_app.stop()
         await app.state.bot_app.shutdown()
 
@@ -219,12 +222,33 @@ app.add_middleware(SlowAPIMiddleware)
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "bot_running": hasattr(app.state, 'bot_app')}
+    bot_running = hasattr(app.state, 'bot_app')
+
+    # ✅ FIX 2: Auto-heal webhook on every health ping (UptimeRobot keeps this alive)
+    # If Render ever drops the webhook, the next ping restores it automatically.
+    if bot_running:
+        WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+        try:
+            webhook_info = await app.state.bot_app.bot.get_webhook_info()
+            if webhook_info.url != WEBHOOK_URL:
+                await app.state.bot_app.bot.set_webhook(
+                    url=WEBHOOK_URL,
+                    drop_pending_updates=False  # don't lose queued messages on heal
+                )
+                logger.info("♻️ Webhook auto-healed")
+        except Exception as e:
+            logger.warning(f"Webhook heal check failed: {e}")
+
+    return {"status": "healthy", "bot_running": bot_running}
 
 
-# ✅ WEBHOOK ENDPOINT — Telegram posts updates here
+# ✅ FIX 3: Guard webhook endpoint — returns clean error if bot failed to init
+# instead of crashing with AttributeError and sending Telegram a 500
 @app.post("/webhook")
 async def telegram_webhook(request: Request):
+    if not hasattr(app.state, 'bot_app'):
+        logger.error("Webhook hit but bot_app not initialized!")
+        return {"ok": False, "error": "Bot not running"}
     data = await request.json()
     update = Update.de_json(data, app.state.bot_app.bot)
     await app.state.bot_app.process_update(update)
