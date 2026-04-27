@@ -2,6 +2,7 @@ import math
 import os
 import httpx
 import asyncio
+import time
 from telegram import Update
 from telegram.ext import ContextTypes
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -21,7 +22,7 @@ def calculate_distance(lat1, lon1, lat2, lon2) -> float:
     dlambda = math.radians(lon2 - lon1)
     a = math.sin(dphi / 2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2)**2
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
+LAST_LOCATION_PING={}
 async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Saves user coordinates and ensures they are linked to the current group."""
     msg = update.message or update.edited_message
@@ -33,6 +34,12 @@ async def track_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat_id, user = msg.chat_id, msg.from_user
     lat, lon = msg.location.latitude, msg.location.longitude
+    current_time = time.time()
+    last_ping =LAST_LOCATION_PING.get(user.id,0)
+
+    if current_time - last_ping < 60:
+        return
+    LAST_LOCATION_PING[user.id] = current_time
 
     try:
         async with get_safe_session() as session:
