@@ -80,7 +80,11 @@ async def record_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_expense_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        # If the query is already expired, just stop here silently.
+        return
 
     data = query.data.split("_")
     action = data[1]

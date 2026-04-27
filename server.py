@@ -123,9 +123,13 @@ async def get_dashboard_link(update: Update, context):
 
 async def global_error_handler(update: object, context):
     """Log the error and send a polite message to the user."""
-    logger.error(f"Exception while handling an update: {context.error}")
+    error_msg = str(context.error)
     
+    if "Query is too old" in error_msg or "query id is invalid" in error_msg:
+        logger.warning(f"Callback expired: {error_msg}")
+        return
     # Send message to the user if possible
+    logger.error(f"Exception while handling an update: {context.error}")
     if isinstance(update, Update) and update.effective_message:
         await update.effective_message.reply_text(
             "⚠️ <b>System Glitch!</b>\nMy circuits got a little tangled. The developers have been notified!",

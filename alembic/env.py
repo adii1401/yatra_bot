@@ -24,7 +24,7 @@ def get_migration_url():
         url = url.replace("ssl=require", "sslmode=require")
     return url
 
-# 🚨 THE FIX: Use the function result instead of a raw env var replace
+# 🚨 THE FIX: Use the helper function to set the URL for Alembic
 config.set_main_option("sqlalchemy.url", get_migration_url())
 
 def run_migrations_offline() -> None:
@@ -39,6 +39,7 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 def run_migrations_online() -> None:
+    # 🚨 INDUSTRY TIP: Use NullPool for Supabase Pooler connections
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

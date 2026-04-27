@@ -50,7 +50,11 @@ async def packing_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_packing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() 
+    try:
+        await query.answer()
+    except Exception:
+        # If the query is already expired, just stop here silently.
+        return
     
     item_id = int(query.data.split("_")[1])
     user_name = query.from_user.first_name
